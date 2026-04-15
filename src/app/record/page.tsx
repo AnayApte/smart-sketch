@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ReactFlow, { Node, Edge } from 'reactflow';
@@ -30,6 +30,11 @@ interface AgentMessage {
     message?: string;
     timestamp?: string;
   };
+}
+
+function isLiveKitConfigured(): boolean {
+  const url = process.env.NEXT_PUBLIC_LIVEKIT_URL;
+  return typeof url === 'string' && url.trim().length > 0;
 }
 
 export default function RecordPage() {
@@ -71,6 +76,8 @@ export default function RecordPage() {
   // LiveKit state
   const [liveKitConnected, setLiveKitConnected] = useState(false);
   const [agentReady, setAgentReady] = useState(false);
+  /** When LiveKit is configured but the Python agent never joins, allow local-only recording after a grace period. */
+  const [allowStartWithoutAgent, setAllowStartWithoutAgent] = useState(false);
   const [transcripts, setTranscripts] = useState<string[]>([]);
 
   const router = useRouter();
@@ -343,7 +350,7 @@ export default function RecordPage() {
       
       console.log('[LiveKit] Token received successfully');
 
-      const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
+      const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL?.trim();
       console.log('[LiveKit] LiveKit URL:', livekitUrl);
       if (!livekitUrl) {
         console.warn('NEXT_PUBLIC_LIVEKIT_URL not set, skipping LiveKit connection');
@@ -448,6 +455,7 @@ export default function RecordPage() {
       console.error('[LiveKit] ❌ Connection error:', error);
       setLiveKitConnected(false);
       setAgentReady(false);
+      setAllowStartWithoutAgent(true);
     }
   }, [handleAgentMessage]);
 
@@ -633,14 +641,88 @@ export default function RecordPage() {
     };
   }, [disconnectFromLiveKit]);
 
-  // Connect to LiveKit when stream is available
+  // Local-only: no LiveKit URL — treat as ready to record once camera/mic work.
+  useEffect(() => {
+    if (stream && !isLiveKitConfigured()) {
+      setAgentReady(true);
+    }
+  }, [stream]);
+
+  // Connect to LiveKit when stream is available and LiveKit is configured
   useEffect(() => {
     console.log('[Connection Check] stream:', !!stream, 'liveKitConnected:', liveKitConnected);
-    if (stream && !liveKitConnected) {
+    if (stream && isLiveKitConfigured() && !liveKitConnected) {
       console.log('[Connection] Initiating LiveKit connection...');
       connectToLiveKit();
     }
   }, [stream, liveKitConnected, connectToLiveKit]);
+
+  // If LiveKit is on but the agent never signals ready, allow starting (local audio + mind map without agent).
+  useEffect(() => {
+    if (!isLiveKitConfigured() || !liveKitConnected || agentReady) {
+      setAllowStartWithoutAgent(false);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      console.warn('[LiveKit] Agent not ready after 25s; allowing recording without agent.');
+      setAllowStartWithoutAgent(true);
+    }, 25000);
+    return () => clearTimeout(id);
+  }, [liveKitConnected, agentReady]);
+
+  const canStartRecording = agentReady || allowStartWithoutAgent || !isLiveKitConfigured();
+
+  const handleChatSubmit = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault();
+      const value = chatInput.trim();
+      if (!value || isChatSending) return;
+
+      const newMessages = [...chatMessages, { role: 'user' as const, content: value }];
+      setChatMessages(newMessages);
+      setChatInput('');
+      setIsChatSending(true);
+
+      try {
+        const transcript = transcripts.join(' ');
+        const title = recordingTitle.trim() || 'Untitled session';
+        const res = await fetch('/api/gemini-chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: newMessages,
+            transcript,
+            title,
+          }),
+        });
+
+        if (!res.ok) {
+          let errDetails = 'Gemini request failed';
+          try {
+            const errJson = await res.json();
+            errDetails = errJson?.details || errJson?.error || errDetails;
+          } catch {
+            /* ignore */
+          }
+          throw new Error(errDetails);
+        }
+
+        const data = await res.json();
+        const reply = data.reply || 'I had trouble generating a response. Please try again.';
+        setChatMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+      } catch (error) {
+        const message = (error as Error)?.message || 'Unknown error';
+        console.error('Gemini chat error:', message);
+        const friendly = message.includes('Missing GEMINI_API_KEY')
+          ? 'Gemini API key is missing. Add GEMINI_API_KEY to .env.local and restart the dev server.'
+          : `Sorry, I ran into an issue: ${message}`;
+        setChatMessages((prev) => [...prev, { role: 'assistant', content: friendly }]);
+      } finally {
+        setIsChatSending(false);
+      }
+    },
+    [chatInput, chatMessages, transcripts, recordingTitle, isChatSending]
+  );
 
   const handleStartRecording = async () => {
     if (stream) {
@@ -883,6 +965,7 @@ export default function RecordPage() {
                       console.log('[New Recording] New session ID:', sessionIdRef.current);
 
                       // Reset all recording-related state
+                      setAllowStartWithoutAgent(false);
                       setShowChat(false);
                       setRecordingEnded(false);
                       setShowFlowBoard(false);
@@ -971,29 +1054,18 @@ export default function RecordPage() {
                       </div>
                     ))}
                   </div>
-                  <form
-                    className="border-t border-surface-border p-4 flex gap-3"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      const value = chatInput.trim();
-                      if (!value) return;
-                      setChatMessages((prev) => [
-                        ...prev,
-                        { role: 'user', content: value },
-                        { role: 'assistant', content: 'AI response coming soon. Integration in progress.' },
-                      ]);
-                      setChatInput('');
-                    }}
-                  >
+                  <form className="border-t border-surface-border p-4 flex gap-3" onSubmit={handleChatSubmit}>
                     <input
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
                       className="flex-1 px-4 py-2.5 rounded-xl input-field text-sm"
                       placeholder="Type your question..."
+                      disabled={isChatSending}
                     />
                     <button
                       type="submit"
-                      className="px-5 py-2.5 rounded-xl btn-primary text-sm"
+                      className="px-5 py-2.5 rounded-xl btn-primary text-sm disabled:opacity-70 disabled:cursor-not-allowed"
+                      disabled={isChatSending}
                     >
                       Send
                     </button>
@@ -1045,14 +1117,14 @@ export default function RecordPage() {
                   {!isRecording ? (
                     <button
                       onClick={handleStartRecording}
-                      disabled={!agentReady}
+                      disabled={!canStartRecording}
                       className={`px-8 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all duration-300 ${
-                        agentReady
+                        canStartRecording
                           ? 'btn-primary'
                           : 'bg-surface-border text-foreground-muted cursor-not-allowed opacity-60'
                       }`}
                     >
-                      {agentReady ? (
+                      {canStartRecording ? (
                         <>
                           <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
                             <circle cx="12" cy="12" r="10" />
@@ -1104,11 +1176,15 @@ export default function RecordPage() {
                 </div>
 
                 <p className="text-center text-sm text-foreground-muted">
-                  {agentReady
-                    ? 'AI agent ready. Click Start Recording to begin.'
-                    : liveKitConnected
-                    ? 'Waiting for AI agent...'
-                    : 'Connecting to AI agent...'}
+                  {!isLiveKitConfigured()
+                    ? 'Local mode: recording works without LiveKit. Mind map updates require the Python agent if you add LiveKit later.'
+                    : canStartRecording
+                      ? agentReady
+                        ? 'AI agent ready. Click Start Recording to begin.'
+                        : 'Starting without agent: you can record locally; the mind map may not update until the agent is running.'
+                      : liveKitConnected
+                        ? 'Waiting for the Python agent… If it does not connect, Start will unlock automatically.'
+                        : 'Connecting to LiveKit...'}
                 </p>
               </div>
             ) : (
@@ -1182,9 +1258,11 @@ export default function RecordPage() {
                         <p className="text-sm text-foreground-muted">
                           {agentReady
                             ? 'Concepts appear as AI processes speech'
-                            : liveKitConnected
-                              ? 'Waiting for agent...'
-                              : 'Connect to see real-time concepts'}
+                            : allowStartWithoutAgent
+                              ? 'Recording without agent — mind map may stay static until the agent runs'
+                              : liveKitConnected
+                                ? 'Waiting for agent...'
+                                : 'Connect LiveKit to see real-time concepts'}
                         </p>
                       </div>
                       {agentReady && (
