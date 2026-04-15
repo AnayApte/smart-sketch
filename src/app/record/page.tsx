@@ -12,6 +12,7 @@ import { saveSession } from '@/lib/sessions-service';
 import { useAuth } from '@/lib/auth-context';
 import NeuralNetworkBackground from '@/components/NeuralNetworkBackground';
 import { findSimilarConcept } from '@/lib/concept-dedup';
+import { authFetch } from '@/lib/auth-fetch';
 
 // Types for agent messages
 interface ConceptData {
@@ -330,7 +331,9 @@ export default function RecordPage() {
       const roomName = `smartsketch-${sessionIdRef.current}`;
       const username = user?.id ? `student-${user.id.slice(0, 8)}` : `student-${Date.now()}`;
       console.log('[LiveKit] Fetching token for room:', roomName, 'user:', username);
-      const response = await fetch(`/api/livekit/token?room=${encodeURIComponent(roomName)}&username=${encodeURIComponent(username)}`);
+      const response = await authFetch(
+        `/api/livekit/token?room=${encodeURIComponent(roomName)}&username=${encodeURIComponent(username)}`
+      );
       console.log('[LiveKit] API response status:', response.status, response.statusText);
       
       if (!response.ok) {
@@ -686,7 +689,7 @@ export default function RecordPage() {
       try {
         const transcript = transcripts.join(' ');
         const title = recordingTitle.trim() || 'Untitled session';
-        const res = await fetch('/api/gemini-chat', {
+        const res = await authFetch('/api/gemini-chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

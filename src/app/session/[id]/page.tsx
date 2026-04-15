@@ -9,6 +9,7 @@ import ReactMarkdown from 'react-markdown';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import NeuralNetworkBackground from '@/components/NeuralNetworkBackground';
 import { getSession, SavedSession } from '@/lib/sessions-service';
+import { authFetch } from '@/lib/auth-fetch';
 
 export default function SessionPage() {
   const router = useRouter();
@@ -78,7 +79,7 @@ export default function SessionPage() {
 
     try {
       const { title, transcript } = session;
-      const res = await fetch('/api/gemini-chat', {
+      const res = await authFetch('/api/gemini-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

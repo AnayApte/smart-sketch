@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { LiveKitRoom, VideoTrack, AudioTrack } from '@livekit/components-react';
+import { authFetch } from '@/lib/auth-fetch';
 
 interface LiveKitCaptureProps {
   isActive: boolean;
@@ -45,7 +46,7 @@ export default function LiveKitCapture({ isActive, onConceptExtracted }: LiveKit
 
         if (currentTranscript.length > 50) {
           try {
-            const response = await fetch('/api/process-transcript', {
+            const response = await authFetch('/api/process-transcript', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ transcript: currentTranscript }),
@@ -132,7 +133,7 @@ export default function LiveKitCapture({ isActive, onConceptExtracted }: LiveKit
     setError('');
     
     try {
-      const response = await fetch('/api/livekit/token?room=lecture-room&username=presenter');
+      const response = await authFetch('/api/livekit/token?room=lecture-room&username=presenter');
       
       if (!response.ok) {
         throw new Error('Failed to fetch token');

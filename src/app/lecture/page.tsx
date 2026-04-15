@@ -4,6 +4,7 @@ import { useState } from 'react';
 import LiveKitCapture from '@/components/LiveKitCapture';
 import MindMapVisualization from '@/components/MindMapVisualization';
 import Link from 'next/link';
+import { ProtectedRoute } from '@/components/ProtectedRoute';
 
 export default function LecturePage() {
   const [isSessionActive, setIsSessionActive] = useState(false);
@@ -22,6 +23,7 @@ export default function LecturePage() {
   };
 
   return (
+    <ProtectedRoute>
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <header className="bg-white shadow-sm border-b border-gray-200">
@@ -73,5 +75,6 @@ export default function LecturePage() {
         </div>
       </div>
     </div>
+    </ProtectedRoute>
   );
 }

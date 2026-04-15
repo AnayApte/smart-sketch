@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { getAuthenticatedUser } from '@/lib/api-auth';
+import { rateLimitExceeded } from '@/lib/rate-limit';
 
 type Concept = {
   label: string;
   type: 'main' | 'concept' | 'detail';
   explanation?: string;
 };
+
+const TRANSCRIPT_MAX = 50_000;
 
 function parseConceptsJson(content: string | null): Concept[] {
   if (!content?.trim()) return [];
@@ -36,13 +40,33 @@ function parseConceptsJson(content: string | null): Concept[] {
   }
 }
 
-// This endpoint processes audio/video transcriptions and extracts concepts
 export async function POST(request: NextRequest) {
   try {
-    const { transcript } = await request.json();
+    const user = await getAuthenticatedUser(request);
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    if (rateLimitExceeded(`transcript:${user.id}`, 30, 60_000)) {
+      return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+    }
+
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== 'object') {
+      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
+
+    const { transcript } = body as { transcript?: unknown };
 
     if (!transcript || typeof transcript !== 'string') {
       return NextResponse.json({ error: 'Transcript is required' }, { status: 400 });
+    }
+
+    if (transcript.length > TRANSCRIPT_MAX) {
+      return NextResponse.json(
+        { error: `Transcript too long (max ${TRANSCRIPT_MAX} characters)` },
+        { status: 400 }
+      );
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
