@@ -52,6 +52,8 @@ export function geminiModelChain(): string[] {
 export function isGeminiRateLimitOrQuotaError(err: unknown): boolean {
   if (err instanceof GoogleGenerativeAIFetchError) {
     if (err.status === 429) return true;
+    // Transient capacity / overload at Google (session chat would otherwise surface raw 503).
+    if (err.status === 503) return true;
     if (err.status === 403) {
       const t = `${err.statusText} ${err.message}`.toLowerCase();
       if (t.includes('quota') || t.includes('rate') || t.includes('exhaust')) return true;
@@ -65,7 +67,10 @@ export function isGeminiRateLimitOrQuotaError(err: unknown): boolean {
     lower.includes('quota') ||
     lower.includes('rate limit') ||
     lower.includes('too many requests') ||
-    /\b429\b/.test(lower)
+    lower.includes('service unavailable') ||
+    lower.includes('high demand') ||
+    /\b429\b/.test(lower) ||
+    /\b503\b/.test(lower)
   );
 }
 
@@ -87,7 +92,7 @@ export async function withGeminiModelFallback<T>(
       lastError = e;
       const canTryNext = i < models.length - 1 && isGeminiRateLimitOrQuotaError(e);
       if (canTryNext) {
-        console.warn(`[Gemini] Model "${name}" hit quota/rate limit; trying "${models[i + 1]}"…`);
+        console.warn(`[Gemini] Model "${name}" unavailable (quota/rate/overload); trying "${models[i + 1]}"…`);
         continue;
       }
       throw e;

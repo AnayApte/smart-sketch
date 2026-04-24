@@ -109,15 +109,24 @@ def _is_gemini_quota_or_rate_limit(exc: BaseException) -> bool:
             "quota",
             "rate limit",
             "too many requests",
+            "service unavailable",
+            "high demand",
         )
     ):
         return True
-    if "429" in msg:
+    if "429" in msg or "503" in msg:
         return True
     try:
         from google.api_core import exceptions as google_exc
 
-        return isinstance(exc, (google_exc.ResourceExhausted, google_exc.TooManyRequests))
+        return isinstance(
+            exc,
+            (
+                google_exc.ResourceExhausted,
+                google_exc.TooManyRequests,
+                google_exc.ServiceUnavailable,
+            ),
+        )
     except ImportError:
         return False
 

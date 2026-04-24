@@ -1,0 +1,1 @@
+{"sessionId":"98ea7f","hypothesisId":"H1","location":"gemini-fallback.ts:withGeminiModelFallback","message":"Gemini model attempt outcome","data":{"model":"gemini-2.0-flash","httpStatus":429,"canTryNext":true},"timestamp":1776995478786}

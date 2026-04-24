@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { useRouter, useParams } from 'next/navigation';
 import ReactFlow, { Node, Edge, Controls, Background } from 'reactflow';
@@ -29,6 +30,8 @@ export default function SessionPage() {
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  const [transcriptModalOpen, setTranscriptModalOpen] = useState(false);
+  const [transcriptModalMounted, setTranscriptModalMounted] = useState(false);
 
   // Load session data
   useEffect(() => {
@@ -53,6 +56,10 @@ export default function SessionPage() {
       loadSession();
     }
   }, [sessionId]);
+
+  useEffect(() => {
+    setTranscriptModalMounted(true);
+  }, []);
 
   const handleChatSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -128,6 +135,20 @@ export default function SessionPage() {
     container.scrollTop = container.scrollHeight;
   }, [chatMessages]);
 
+  useEffect(() => {
+    if (!transcriptModalOpen) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTranscriptModalOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [transcriptModalOpen]);
+
   // Format date helper
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
@@ -171,9 +192,9 @@ export default function SessionPage() {
   return (
     <ProtectedRoute>
       <NeuralNetworkBackground />
-      <div className="relative z-10 w-full min-h-screen bg-transparent overflow-hidden animate-fade-in-down">
+      <div className="relative z-10 flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-transparent animate-fade-in-down">
         {/* Header */}
-        <header className="absolute top-0 left-0 right-0 z-20 px-6 py-6 opacity-0 animate-fade-in-down [animation-delay:0.1s] [animation-fill-mode:forwards]">
+        <header className="absolute top-0 left-0 right-0 z-20 shrink-0 px-6 py-6 opacity-0 animate-fade-in-down [animation-delay:0.1s] [animation-fill-mode:forwards]">
           <div className="flex items-center gap-4">
             <Link
               href="/library"
@@ -191,34 +212,41 @@ export default function SessionPage() {
           </div>
         </header>
 
-        {/* Main Layout */}
-        <div className="flex h-screen w-full pt-20">
-          {/* LEFT SIDE - Transcript (1/3) and Chat (2/3) */}
-          <div className="w-1/2 flex flex-col gap-6 p-6 overflow-hidden">
-            {/* Transcript Section - Top Third */}
-            <div className="h-1/3 card overflow-hidden flex flex-col opacity-0 animate-fade-in-up [animation-delay:0.2s] [animation-fill-mode:forwards]">
-              <div className="px-6 py-4 border-b border-surface-border bg-background-secondary">
-                <h2 className="text-sm font-display font-bold text-foreground uppercase tracking-wider">Session Transcript</h2>
-                <p className="text-xs text-foreground-muted mt-1">Full session text</p>
-              </div>
-              <div className="flex-1 overflow-y-auto custom-scrollbar px-6 py-4">
-                <p className="text-sm text-foreground-muted leading-relaxed whitespace-pre-wrap break-words">
-                  {session.transcript || 'No transcript available'}
+        {/* Main Layout — flex-1 keeps chat + sketch inside viewport (input not clipped) */}
+        <div className="flex min-h-0 flex-1 w-full pt-20">
+          {/* LEFT SIDE — compact transcript + chat */}
+          <div className="flex min-h-0 w-1/2 flex-col gap-6 overflow-hidden px-6 pt-6 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))]">
+            {/* Transcript: single visible line; full text only in modal */}
+            <div className="shrink-0 card overflow-hidden opacity-0 animate-fade-in-up [animation-delay:0.2s] [animation-fill-mode:forwards]">
+              <div className="px-3 py-2 border-b border-surface-border bg-background-secondary flex items-center gap-2 min-h-0">
+                <span className="shrink-0 text-xs font-display font-bold text-foreground uppercase tracking-wider">
+                  Transcript
+                </span>
+                <p className="min-w-0 flex-1 text-sm text-foreground-muted leading-tight truncate">
+                  {(session.transcript || '').trim() || 'No transcript available'}
                 </p>
+                {(session.transcript || '').trim() ? (
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptModalOpen(true)}
+                    className="shrink-0 text-xs font-semibold text-primary hover:text-primary-dark transition-colors whitespace-nowrap"
+                  >
+                    See more
+                  </button>
+                ) : null}
               </div>
             </div>
 
-            {/* Chat Section - Bottom 2/3 */}
-            <div className="h-2/3 card flex flex-col overflow-hidden opacity-0 animate-fade-in-up [animation-delay:0.3s] [animation-fill-mode:forwards]">
-              <div className="px-6 py-4 border-b border-surface-border bg-background-secondary">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden card opacity-0 animate-fade-in-up [animation-delay:0.3s] [animation-fill-mode:forwards]">
+              <div className="shrink-0 border-b border-surface-border bg-background-secondary px-6 py-3">
                 <h2 className="text-sm font-display font-bold text-foreground uppercase tracking-wider">Session Chat</h2>
-                <p className="text-xs text-foreground-muted mt-1">Ask questions about this session</p>
+                <p className="text-xs text-foreground-muted mt-0.5">Ask questions about this session</p>
               </div>
 
-              {/* Messages */}
+              {/* Messages — only this region scrolls */}
               <div
                 ref={messagesContainerRef}
-                className="flex-1 overflow-y-auto custom-scrollbar px-4 py-3 space-y-3"
+                className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-4 py-3 space-y-3"
               >
                 {chatMessages.length === 0 && (
                   <div className="text-xs text-foreground-muted text-center py-8">No messages yet. Start the conversation.</div>
@@ -256,7 +284,7 @@ export default function SessionPage() {
               </div>
 
               {/* Input Form */}
-              <div className="border-t border-surface-border p-4 bg-background-secondary">
+              <div className="shrink-0 border-t border-surface-border bg-background-secondary p-4">
                 <form className="flex gap-3" onSubmit={handleChatSubmit}>
                   <input
                     value={chatInput}
@@ -278,16 +306,16 @@ export default function SessionPage() {
           </div>
 
           {/* RIGHT SIDE - Mind Map */}
-          <div className="w-1/2 flex flex-col p-6 overflow-hidden opacity-0 animate-fade-in-down [animation-delay:0.2s] [animation-fill-mode:forwards]">
-            <div className="flex-1 card overflow-hidden flex flex-col">
-              <div className="px-6 py-4 border-b border-surface-border bg-background-secondary">
+          <div className="flex min-h-0 w-1/2 flex-col overflow-hidden px-6 pt-6 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))] opacity-0 animate-fade-in-down [animation-delay:0.2s] [animation-fill-mode:forwards]">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden card">
+              <div className="shrink-0 border-b border-surface-border bg-background-secondary px-6 py-3">
                 <h2 className="text-sm font-display font-bold text-foreground uppercase tracking-wider">Concept Sketch</h2>
                 <p className="text-xs text-foreground-muted mt-1">
                   Concepts captured from this session
                 </p>
               </div>
               
-              <div className="flex-1 overflow-hidden relative">
+              <div className="relative min-h-0 flex-1 overflow-hidden">
                 {nodes.length > 0 ? (
                   <ReactFlow 
                     nodes={nodes} 
@@ -306,6 +334,43 @@ export default function SessionPage() {
             </div>
           </div>
         </div>
+
+        {transcriptModalMounted &&
+          transcriptModalOpen &&
+          (session.transcript || '').trim() &&
+          createPortal(
+            <div
+              className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto overscroll-contain bg-background/80 p-4 backdrop-blur-sm animate-fade-in-scale"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="transcript-modal-title"
+              onClick={() => setTranscriptModalOpen(false)}
+            >
+              <div
+                className="card my-auto flex max-h-[min(85dvh,85vh)] w-full max-w-2xl flex-col overflow-hidden shadow-xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex shrink-0 items-center justify-between gap-4 border-b border-surface-border bg-background-secondary px-6 py-4">
+                  <h2 id="transcript-modal-title" className="text-lg font-display font-bold text-foreground">
+                    Full transcript
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptModalOpen(false)}
+                    className="rounded-xl px-4 py-2 text-sm font-semibold glass text-foreground-muted transition-colors hover:text-foreground"
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-6 py-4">
+                  <p className="text-sm leading-relaxed text-foreground-muted break-words whitespace-pre-wrap">
+                    {session.transcript}
+                  </p>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )}
       </div>
     </ProtectedRoute>
   );
