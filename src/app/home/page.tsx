@@ -51,8 +51,8 @@ export default function HomePage() {
           </div>
 
           {/* Action Cards */}
-          <div className="w-full max-w-6xl">
-            <div className="grid md:grid-cols-3 gap-6">
+          <div className="w-full max-w-4xl">
+            <div className="grid md:grid-cols-2 gap-6">
               {/* New Sketch Card */}
               <div className="group relative animate-fade-in-up opacity-0 [animation-delay:0.2s] [animation-fill-mode:forwards]">
                 <div className="absolute inset-0 bg-gradient-to-br from-primary/20 to-transparent rounded-2xl blur-xl opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
@@ -106,30 +106,6 @@ export default function HomePage() {
                     className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl btn-accent text-sm"
                   >
                     Browse Library
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
-                    </svg>
-                  </Link>
-                </div>
-              </div>
-
-              <div className="group relative animate-fade-in-up opacity-0 [animation-delay:0.3s] [animation-fill-mode:forwards]">
-                <div className="absolute inset-0 bg-gradient-to-br from-primary/10 to-transparent rounded-2xl blur-xl opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-                <div className="relative card p-8 hover:border-primary/20 transition-all duration-300">
-                  <div className="w-14 h-14 rounded-xl bg-primary/5 border border-primary/15 flex items-center justify-center mb-6">
-                    <svg className="w-7 h-7 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                    </svg>
-                  </div>
-                  <h3 className="text-xl font-display font-bold text-foreground mb-2">Lecture mode</h3>
-                  <p className="text-foreground-muted text-sm mb-6 leading-relaxed">
-                    Split view with browser speech and the same concept API—no Python agent required.
-                  </p>
-                  <Link
-                    href="/lecture"
-                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl border border-surface-border-light text-foreground hover:border-primary/40 text-sm font-medium transition-colors"
-                  >
-                    Open lecture mode
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
                     </svg>

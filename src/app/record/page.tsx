@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback, type FormEvent } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ReactFlow, { Node, Edge } from 'reactflow';
@@ -105,6 +106,8 @@ export default function RecordPage() {
   /** When LiveKit is configured but the Python agent never joins, allow local-only recording after a grace period. */
   const [allowStartWithoutAgent, setAllowStartWithoutAgent] = useState(false);
   const [transcripts, setTranscripts] = useState<string[]>([]);
+  const [transcriptModal, setTranscriptModal] = useState<{ title: string; body: string } | null>(null);
+  const [transcriptModalMounted, setTranscriptModalMounted] = useState(false);
 
   const router = useRouter();
 
@@ -146,6 +149,24 @@ export default function RecordPage() {
   useEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
+
+  useEffect(() => {
+    setTranscriptModalMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!transcriptModal) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTranscriptModal(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [transcriptModal]);
 
   // Add multiple concepts to the mind map with proper hierarchy
   const addConceptsToMap = useCallback((concepts: ConceptData[]) => {
@@ -1045,7 +1066,7 @@ export default function RecordPage() {
   return (
     <ProtectedRoute>
       <NeuralNetworkBackground />
-      <div className="relative z-10 w-full min-h-screen bg-transparent overflow-hidden">
+      <div className="relative z-10 flex h-screen w-full flex-col overflow-hidden bg-transparent">
         {/* Back Button - Top Left */}
         <div className="absolute top-6 left-6 z-20">
           <button
@@ -1083,12 +1104,16 @@ export default function RecordPage() {
         )}
 
         {/* Main Layout: Recording on Left, Flow Board on Right */}
-        <div className="flex h-screen w-full">
+        <div className="flex min-h-0 flex-1 w-full">
           {/* LEFT SIDE - Recording Interface */}
-          <div className={`flex flex-col items-center justify-center px-4 pt-20 transition-all duration-500 ${showFlowBoard ? 'w-1/2' : 'w-full'}`}>
+          <div
+            className={`flex flex-col items-center px-4 pt-20 transition-all duration-500 min-h-0 ${showFlowBoard ? 'w-1/2' : 'w-full'} ${
+              showChat ? 'h-full justify-start overflow-hidden' : 'justify-center'
+            }${showChat && showFlowBoard ? ' pb-[max(1rem,env(safe-area-inset-bottom,0px))]' : ''}`}
+          >
             {showChat ? (
-              <div className="w-full max-w-2xl space-y-6 animate-fade-in-up">
-                <div className="text-center">
+              <div className="flex min-h-0 w-full max-w-2xl flex-1 flex-col gap-6 animate-fade-in-up">
+                <div className="shrink-0 text-center">
                   <h1 className="text-3xl font-display font-bold text-foreground mb-2">Session Chat</h1>
                   <p className="text-foreground-muted">Ask questions about your session</p>
                   <button
@@ -1105,6 +1130,7 @@ export default function RecordPage() {
                       setShowFlowBoard(false);
                       setChatMessages([]);
                       setTranscripts([]);
+                      setTranscriptModal(null);
                       setNodes([{
                         id: 'center',
                         data: { label: 'Lecture', plainLabel: 'Lecture' },
@@ -1157,17 +1183,35 @@ export default function RecordPage() {
                   </button>
                 </div>
 
-                {/* Transcripts preview */}
+                {/* Session transcript: same width/style as pre–See-more strip (max-w-2xl column + p-4 tinted box) */}
                 {transcripts.length > 0 && (
-                  <div className="rounded-xl bg-primary/5 border border-primary/10 p-4 max-h-32 overflow-y-auto custom-scrollbar">
-                    <h3 className="text-xs font-semibold text-primary mb-2 uppercase tracking-wider">Session Transcript</h3>
-                    <p className="text-sm text-foreground-muted">{transcripts.join(' ')}</p>
+                  <div className="shrink-0 w-full rounded-xl bg-primary/5 border border-primary/10 p-4 overflow-hidden">
+                    <div className="flex items-center gap-2 min-h-0">
+                      <span className="shrink-0 text-xs font-display font-bold text-foreground uppercase tracking-wider">
+                        Session Transcript
+                      </span>
+                      <p className="min-w-0 flex-1 text-sm text-foreground-muted leading-tight truncate">
+                        {transcripts.join(' ').trim()}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setTranscriptModal({
+                            title: 'Full transcript',
+                            body: transcripts.join(' ').trim(),
+                          })
+                        }
+                        className="shrink-0 text-xs font-semibold text-primary hover:text-primary-dark transition-colors whitespace-nowrap"
+                      >
+                        See more
+                      </button>
+                    </div>
                   </div>
                 )}
 
-                {/* Chat container */}
-                <div className="card h-[60vh] flex flex-col">
-                  <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 custom-scrollbar">
+                {/* Chat container — fills space between header/transcript and input */}
+                <div className="card flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 space-y-3 custom-scrollbar">
                     {chatMessages.length === 0 && (
                       <div className="text-sm text-foreground-muted text-center py-8">No messages yet. Start the conversation.</div>
                     )}
@@ -1201,7 +1245,7 @@ export default function RecordPage() {
                       </div>
                     )}
                   </div>
-                  <form className="border-t border-surface-border p-4 flex gap-3" onSubmit={handleChatSubmit}>
+                  <form className="shrink-0 border-t border-surface-border p-4 flex gap-3" onSubmit={handleChatSubmit}>
                     <input
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
@@ -1393,13 +1437,27 @@ export default function RecordPage() {
 
           {/* RIGHT SIDE - React Flow Board */}
           <div
-            className={`transition-all duration-700 ease-out overflow-hidden flex items-center justify-center ${
-              showFlowBoard ? 'w-1/2 opacity-100' : 'w-0 opacity-0'
+            className={`flex min-h-0 overflow-hidden transition-all duration-700 ease-out ${
+              showFlowBoard
+                ? `h-full w-1/2 opacity-100${showChat ? '' : ' items-center justify-center'}`
+                : 'w-0 opacity-0'
             }`}
           >
             {showFlowBoard && (
-              <div className="w-full h-full flex items-center justify-center p-6">
-                <div className="w-full h-full card overflow-hidden flex flex-col">
+              <div
+                className={
+                  showChat
+                    ? 'flex h-full min-h-0 w-full flex-col px-6 pt-20 pb-[max(1rem,env(safe-area-inset-bottom,0px))]'
+                    : 'flex h-full min-h-0 w-full items-center justify-center p-6'
+                }
+              >
+                <div
+                  className={
+                    showChat
+                      ? 'card flex min-h-0 w-full flex-1 flex-col overflow-hidden'
+                      : 'flex h-full w-full flex-col overflow-hidden card'
+                  }
+                >
                   <div className="px-6 py-4 border-b border-surface-border bg-background-secondary">
                     <div className="flex items-center justify-between">
                       <div>
@@ -1430,11 +1488,27 @@ export default function RecordPage() {
                       attributionPosition="bottom-left"
                     />
                   </div>
-                  {/* Live transcript preview */}
+                  {/* Latest transcript: no scroll; See more opens modal */}
                   {transcripts.length > 0 && (
-                    <div className="px-4 py-3 border-t border-surface-border bg-background-secondary max-h-24 overflow-y-auto custom-scrollbar">
-                      <p className="text-xs text-foreground-muted font-medium mb-1 uppercase tracking-wider">Latest transcript</p>
-                      <p className="text-sm text-foreground">{transcripts[transcripts.length - 1]}</p>
+                    <div className="shrink-0 border-t border-surface-border bg-background-secondary px-3 py-2 flex items-center gap-2 min-h-0">
+                      <span className="shrink-0 text-xs font-display font-bold text-foreground-muted uppercase tracking-wider">
+                        Latest
+                      </span>
+                      <p className="min-w-0 flex-1 text-sm text-foreground leading-tight truncate">
+                        {transcripts[transcripts.length - 1]}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setTranscriptModal({
+                            title: 'Latest transcript',
+                            body: transcripts[transcripts.length - 1]?.trim() ?? '',
+                          })
+                        }
+                        className="shrink-0 text-xs font-semibold text-primary hover:text-primary-dark transition-colors whitespace-nowrap"
+                      >
+                        See more
+                      </button>
                     </div>
                   )}
                 </div>
@@ -1611,6 +1685,42 @@ export default function RecordPage() {
           </div>
         </div>
       )}
+
+        {transcriptModalMounted &&
+          transcriptModal &&
+          createPortal(
+            <div
+              className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto overscroll-contain bg-background/80 p-4 backdrop-blur-sm animate-fade-in-scale"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="record-transcript-modal-title"
+              onClick={() => setTranscriptModal(null)}
+            >
+              <div
+                className="card my-auto flex max-h-[min(85dvh,85vh)] w-full max-w-2xl flex-col overflow-hidden shadow-xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex shrink-0 items-center justify-between gap-4 border-b border-surface-border bg-background-secondary px-6 py-4">
+                  <h2 id="record-transcript-modal-title" className="text-lg font-display font-bold text-foreground">
+                    {transcriptModal.title}
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptModal(null)}
+                    className="rounded-xl px-4 py-2 text-sm font-semibold glass text-foreground-muted transition-colors hover:text-foreground"
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-6 py-4">
+                  <p className="text-sm leading-relaxed text-foreground-muted break-words whitespace-pre-wrap">
+                    {transcriptModal.body}
+                  </p>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )}
     </div>
     </ProtectedRoute>
   );

@@ -9,14 +9,6 @@ export interface Concept {
   timestamp?: number;
 }
 
-export interface LectureSession {
-  id: string;
-  roomName: string;
-  startTime: Date;
-  endTime?: Date;
-  concepts: Concept[];
-}
-
 export interface LiveKitConfig {
   url: string;
   apiKey: string;

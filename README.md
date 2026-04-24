@@ -25,9 +25,8 @@ The application consists of:
    - OpenAI integration for concept extraction
 
 3. **Key Components**
-   - `LiveKitCapture`: Handles video/audio streaming
-   - `MindMapVisualization`: Renders interactive concept maps
-   - Lecture page: Main interface for live sessions
+   - `record/page.tsx`: Live capture, LiveKit, and mind map during sessions
+   - `MindMapVisualization`: Renders interactive concept maps (demo)
    - Demo page: Interactive demonstration
 
 ## 🚀 Getting Started
@@ -83,13 +82,13 @@ The application consists of:
 
 ## 📖 Usage
 
-### Starting a Live Lecture Session
+### Starting a recording session
 
-1. Navigate to the home page
-2. Click "Start Lecture Session"
+1. Sign in and open the home hub
+2. Click **Begin Session** (opens `/record`)
 3. Allow camera and microphone permissions
-4. Click "Start Session" to begin capturing
-5. Watch as concepts are extracted and visualized in real-time
+4. Click **Start Recording** to begin capturing
+5. Watch as concepts are extracted and visualized in real time
 
 ### Viewing the Demo
 
@@ -108,14 +107,12 @@ smart-sketch/
 │   │   ├── api/                    # API routes
 │   │   │   ├── livekit/token/     # LiveKit token generation
 │   │   │   └── process-transcript/ # AI transcript processing
-│   │   ├── lecture/                # Lecture session page
 │   │   ├── demo/                   # Demo page
 │   │   ├── layout.tsx              # Root layout
 │   │   ├── page.tsx                # Home page
 │   │   └── globals.css             # Global styles
 │   ├── components/
-│   │   ├── LiveKitCapture.tsx      # Video/audio capture component
-│   │   └── MindMapVisualization.tsx # Mind map rendering
+│   │   └── MindMapVisualization.tsx # Mind map rendering (demo)
 │   ├── lib/
 │   │   └── utils.ts                # Utility functions
 │   └── types/
@@ -147,7 +144,7 @@ Customize node styles in `src/components/MindMapVisualization.tsx` and ReactFlow
 
 ### Adjusting Processing Intervals
 
-In `src/components/LiveKitCapture.tsx`, modify the interval timing for transcript processing (currently 10 seconds).
+In `src/app/record/page.tsx`, adjust browser transcript batching if you use local STT fallback (timing is driven there).
 
 ## 🤝 Contributing
 

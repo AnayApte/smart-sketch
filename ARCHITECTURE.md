@@ -23,9 +23,7 @@ First, ensure you have the necessary accounts and credentials:
 
 ### 2. **Understanding the Application Flow**
 
-There are **two** capture paths:
-
-**A. `/record` (primary)** — LiveKit + optional Python agent  
+Primary capture path — **`/record`** (LiveKit + optional Python agent):
 ```
 User signs in → /home → /record
          ↓
@@ -38,15 +36,6 @@ If LiveKit URL missing OR agent never joins (grace period): Web Speech in browse
 React Flow mind map (addConceptsToMap) + optional Gemini chat + save to Supabase
 ```
 
-**B. `/lecture`** — Browser-first  
-```
-User opens /lecture → LiveKitRoom for preview + Web Speech final transcripts
-         ↓
-Buffered text → /api/process-transcript (Gemini, hierarchical JSON with id/parent)
-         ↓
-MindMapVisualization (React Flow) with a session root node and edges
-```
-
 Shared types for AI output: `src/lib/concept-types.ts` (`ConceptPayload`).
 
 ## 📁 Key Files and Their Purpose
@@ -55,20 +44,15 @@ Shared types for AI output: `src/lib/concept-types.ts` (`ConceptPayload`).
 
 #### `src/app/page.tsx` - Marketing / auth landing
 - Landing hero and embedded `AuthForm` (sign in / sign up)
-- **After login**, users go to `/home` (not lecture from this page alone)
+- **After login**, users go to `/home`
 
 #### `src/app/home/page.tsx` - Signed-in hub
-- Links to `/record`, `/library`, and `/lecture`
+- Links to `/record` and `/library`
 
 #### `src/app/record/page.tsx` - Primary recording session
 - LiveKit connect + publish tracks; `DataReceived` → concepts
 - Browser STT fallback when LiveKit is off or `allowStartWithoutAgent` is true
 - **Customize**: layout, batching interval (local STT uses 10s), mind map styling
-
-#### `src/app/lecture/page.tsx` - Lecture / browser STT UI
-- Split-screen: `LiveKitCapture` + `MindMapVisualization`
-- Session start/stop controls
-- **Customize**: Layout, additional controls, recording features
 
 #### `src/app/demo/page.tsx` - Interactive Demo
 - Step-by-step demonstration of concept building
@@ -77,16 +61,8 @@ Shared types for AI output: `src/lib/concept-types.ts` (`ConceptPayload`).
 
 ### **Component Files**
 
-#### `src/components/LiveKitCapture.tsx` - Video/Audio Capture (lecture page)
-**Purpose**: LiveKit token + room, **Web Speech API** for finals-only captions, periodic `/api/process-transcript`
-
-**Key Functions**:
-- `fetchToken()` — LiveKit access token (`authFetch`)
-- `handleTranscript()` — buffers text, starts 10s interval to call the API
-- `simulateTranscript()` — demo lines for testing (interval cleared on unmount)
-
-#### `src/components/MindMapVisualization.tsx` - Mind Map Rendering (lecture page)
-**Purpose**: Builds React Flow nodes/edges from `ConceptPayload[]` (including `parent` links). Inserts a small **Session** root node and edges from it for top-level concepts.
+#### `src/components/MindMapVisualization.tsx` - Mind Map Rendering (demo)
+**Purpose**: Builds React Flow nodes/edges from `ConceptPayload[]` (including `parent` links). Inserts a small **Session** root node and edges from it for top-level concepts. The live `/record` flow uses React Flow directly on that page.
 
 #### `agent/main.py` - LiveKit worker
 **Purpose**: Subscribes to published **audio**, streams frames to **Deepgram**, batches finals, calls **Gemini**, `publish_data` topic `smartsketch`. Env: `agent/.env` (`DEEPGRAM_API_KEY`, `GEMINI_API_KEY`, LiveKit).
@@ -115,7 +91,6 @@ Helper functions for:
 #### `src/types/index.ts`
 TypeScript definitions for:
 - Concepts
-- Lecture sessions
 - Configuration interfaces
 
 ## 🔧 Common Customization Tasks
@@ -135,20 +110,7 @@ position = {
 }
 ```
 
-### **2. Add Real Speech-to-Text**
-
-Replace simulation in `src/components/LiveKitCapture.tsx`:
-
-```typescript
-// Add Web Speech API or third-party service
-const recognition = new webkitSpeechRecognition();
-recognition.onresult = (event) => {
-  const transcript = event.results[0][0].transcript;
-  handleTranscript(transcript);
-};
-```
-
-### **3. Customize AI Concept Extraction**
+### **2. Customize AI concept extraction**
 
 Edit `src/app/api/process-transcript/route.ts`:
 
@@ -160,29 +122,7 @@ content: `Identify main arguments and supporting evidence...`
 content: `Find key takeaways and action items...`
 ```
 
-### **4. Add Session Recording**
-
-In `src/app/lecture/page.tsx`:
-
-```typescript
-const [recording, setRecording] = useState([]);
-
-const handleConceptExtracted = (concept) => {
-  setConceptData(prev => [...prev, concept]);
-  setRecording(prev => [...prev, {
-    concept,
-    timestamp: Date.now()
-  }]);
-};
-
-// Add export button
-const exportSession = () => {
-  const data = JSON.stringify(recording);
-  // Download or save to backend
-};
-```
-
-### **5. Improve Node Styling**
+### **3. Improve Node Styling**
 
 Edit `src/components/MindMapVisualization.tsx`:
 
@@ -207,15 +147,11 @@ const MainNode = ({ data }) => (
 
 ### **Immediate Priorities**
 
-1. **Add Real Transcription**
-   - Integrate Web Speech API or Deepgram
-   - File: `src/components/LiveKitCapture.tsx`
-
-2. **Enhance AI Prompts**
+1. **Enhance AI Prompts**
    - Test different prompts for better concept extraction
    - File: `src/app/api/process-transcript/route.ts`
 
-3. **Improve Layout Algorithm**
+2. **Improve Layout Algorithm**
    - Implement force-directed layout or dagre
    - File: `src/components/MindMapVisualization.tsx`
 
@@ -223,12 +159,12 @@ const MainNode = ({ data }) => (
 
 1. **User Authentication**
    - Add NextAuth.js
-   - Protect lecture sessions
+   - Protect recording sessions
    - Save user preferences
 
 2. **Session Management**
    - Store sessions in database
-   - Allow replay of past lectures
+   - Allow replay of past sessions
    - Export as PDF/Image
 
 3. **Collaborative Features**

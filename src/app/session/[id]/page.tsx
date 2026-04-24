@@ -212,90 +212,89 @@ export default function SessionPage() {
           </div>
         </header>
 
-        {/* Main Layout — flex-1 keeps chat + sketch inside viewport (input not clipped) */}
-        <div className="flex min-h-0 flex-1 w-full pt-20">
-          {/* LEFT SIDE — compact transcript + chat */}
-          <div className="flex min-h-0 w-1/2 flex-col gap-6 overflow-hidden px-6 pt-6 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))]">
-            {/* Transcript: single visible line; full text only in modal */}
-            <div className="shrink-0 card overflow-hidden opacity-0 animate-fade-in-up [animation-delay:0.2s] [animation-fill-mode:forwards]">
-              <div className="px-3 py-2 border-b border-surface-border bg-background-secondary flex items-center gap-2 min-h-0">
-                <span className="shrink-0 text-xs font-display font-bold text-foreground uppercase tracking-wider">
-                  Transcript
-                </span>
-                <p className="min-w-0 flex-1 text-sm text-foreground-muted leading-tight truncate">
-                  {(session.transcript || '').trim() || 'No transcript available'}
-                </p>
-                {(session.transcript || '').trim() ? (
-                  <button
-                    type="button"
-                    onClick={() => setTranscriptModalOpen(true)}
-                    className="shrink-0 text-xs font-semibold text-primary hover:text-primary-dark transition-colors whitespace-nowrap"
-                  >
-                    See more
-                  </button>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden card opacity-0 animate-fade-in-up [animation-delay:0.3s] [animation-fill-mode:forwards]">
-              <div className="shrink-0 border-b border-surface-border bg-background-secondary px-6 py-3">
-                <h2 className="text-sm font-display font-bold text-foreground uppercase tracking-wider">Session Chat</h2>
-                <p className="text-xs text-foreground-muted mt-0.5">Ask questions about this session</p>
+        {/* Main layout — matches record page after recording (Session Chat + flow board) */}
+        <div className="flex min-h-0 flex-1 w-full">
+          {/* LEFT — same structure as record/page.tsx showChat column */}
+          <div className="flex h-full min-h-0 w-1/2 flex-col items-center justify-start overflow-hidden px-4 pt-20 pb-[max(1rem,env(safe-area-inset-bottom,0px))] transition-all duration-500">
+            {/* Markup aligned with record/page.tsx showChat branch (lines ~1115–1264) */}
+            <div className="flex min-h-0 w-full max-w-2xl flex-1 flex-col gap-6 animate-fade-in-up">
+              <div className="shrink-0 text-center">
+                <h1 className="text-3xl font-display font-bold text-foreground mb-2">Session Chat</h1>
+                <p className="text-foreground-muted">Ask questions about your session</p>
+                <Link href="/record" className="mt-4 inline-block px-6 py-2.5 rounded-xl btn-primary font-semibold">
+                  Start New Recording
+                </Link>
               </div>
 
-              {/* Messages — only this region scrolls */}
-              <div
-                ref={messagesContainerRef}
-                className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-4 py-3 space-y-3"
-              >
-                {chatMessages.length === 0 && (
-                  <div className="text-xs text-foreground-muted text-center py-8">No messages yet. Start the conversation.</div>
-                )}
-                {chatMessages.map((msg, idx) => (
-                  <div
-                    key={idx}
-                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div
-                      className={`max-w-[75%] rounded-xl px-4 py-2.5 text-sm opacity-0 animate-fade-in-up [animation-fill-mode:forwards] ${
-                        msg.role === 'user'
-                          ? 'bg-gradient-to-r from-primary to-primary-dark text-background'
-                          : 'bg-background-secondary text-foreground border border-surface-border'
-                      }`}
-                      style={{ animationDelay: `${idx * 50}ms` }}
+              {(session.transcript || '').trim() ? (
+                <div className="shrink-0 w-full rounded-xl bg-primary/5 border border-primary/10 p-4 overflow-hidden">
+                  <div className="flex items-center gap-2 min-h-0">
+                    <span className="shrink-0 text-xs font-display font-bold text-foreground uppercase tracking-wider">
+                      Session Transcript
+                    </span>
+                    <p className="min-w-0 flex-1 text-sm text-foreground-muted leading-tight truncate">
+                      {(session.transcript || '').trim()}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setTranscriptModalOpen(true)}
+                      className="shrink-0 text-xs font-semibold text-primary hover:text-primary-dark transition-colors whitespace-nowrap"
                     >
-                      {msg.role === 'assistant' ? (
-                        <div className="prose prose-sm prose-invert max-w-none [&_p]:mb-2 [&_ul]:mb-2 [&_ol]:mb-2 [&_li]:mb-1 [&_code]:bg-black/40 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-foreground [&_pre]:bg-black/40 [&_pre]:text-foreground [&_pre]:p-2 [&_pre]:rounded [&_strong]:text-primary [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-xs">
-                          <ReactMarkdown>{msg.content}</ReactMarkdown>
-                        </div>
-                      ) : (
-                        msg.content
-                      )}
-                    </div>
+                      See more
+                    </button>
                   </div>
-                ))}
-                {isSending && (
-                  <div className="flex justify-start">
-                    <div className="max-w-[75%] rounded-xl px-4 py-2.5 text-sm bg-background-secondary text-foreground border border-surface-border opacity-80 animate-pulse">
-                      Assistant is thinking...
-                    </div>
-                  </div>
-                )}
-              </div>
+                </div>
+              ) : null}
 
-              {/* Input Form */}
-              <div className="shrink-0 border-t border-surface-border bg-background-secondary p-4">
-                <form className="flex gap-3" onSubmit={handleChatSubmit}>
+              <div className="card flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div
+                  ref={messagesContainerRef}
+                  className="min-h-0 flex-1 overflow-y-auto px-4 py-3 space-y-3 custom-scrollbar"
+                >
+                  {chatMessages.length === 0 && (
+                    <div className="text-sm text-foreground-muted text-center py-8">No messages yet. Start the conversation.</div>
+                  )}
+                  {chatMessages.map((msg, idx) => (
+                    <div
+                      key={idx}
+                      className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
+                      <div
+                        className={`max-w-[75%] rounded-xl px-4 py-2.5 text-sm message-pop ${
+                          msg.role === 'user'
+                            ? 'bg-gradient-to-r from-primary to-primary-dark text-background'
+                            : 'bg-background-secondary text-foreground border border-surface-border'
+                        }`}
+                      >
+                        {msg.role === 'assistant' ? (
+                          <div className="prose prose-sm prose-invert max-w-none [&_p]:mb-2 [&_ul]:mb-2 [&_ol]:mb-2 [&_li]:mb-1 [&_code]:bg-black/40 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-foreground [&_pre]:bg-black/40 [&_pre]:text-foreground [&_pre]:p-2 [&_pre]:rounded [&_strong]:text-primary [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-xs">
+                            <ReactMarkdown>{msg.content}</ReactMarkdown>
+                          </div>
+                        ) : (
+                          msg.content
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {isSending && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[75%] rounded-xl px-4 py-2.5 text-sm bg-background-secondary text-foreground border border-surface-border opacity-80 animate-pulse">
+                        Assistant is thinking...
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <form className="shrink-0 border-t border-surface-border p-4 flex gap-3" onSubmit={handleChatSubmit}>
                   <input
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
                     className="flex-1 px-4 py-2.5 rounded-xl input-field text-sm"
-                    placeholder="Ask about this session..."
+                    placeholder="Type your question..."
                     disabled={isSending}
                   />
                   <button
                     type="submit"
-                    className="px-5 py-2.5 rounded-xl btn-primary text-sm font-medium disabled:opacity-70 disabled:cursor-not-allowed"
+                    className="px-5 py-2.5 rounded-xl btn-primary text-sm disabled:opacity-70 disabled:cursor-not-allowed"
                     disabled={isSending}
                   >
                     Send
@@ -305,31 +304,26 @@ export default function SessionPage() {
             </div>
           </div>
 
-          {/* RIGHT SIDE - Mind Map */}
-          <div className="flex min-h-0 w-1/2 flex-col overflow-hidden px-6 pt-6 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))] opacity-0 animate-fade-in-down [animation-delay:0.2s] [animation-fill-mode:forwards]">
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden card">
-              <div className="shrink-0 border-b border-surface-border bg-background-secondary px-6 py-3">
-                <h2 className="text-sm font-display font-bold text-foreground uppercase tracking-wider">Concept Sketch</h2>
-                <p className="text-xs text-foreground-muted mt-1">
-                  Concepts captured from this session
-                </p>
-              </div>
-              
-              <div className="relative min-h-0 flex-1 overflow-hidden">
-                {nodes.length > 0 ? (
-                  <ReactFlow 
-                    nodes={nodes} 
-                    edges={edges}
-                    fitView
-                  >
-                    <Background />
-                    <Controls />
-                  </ReactFlow>
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center">
-                    <p className="text-foreground-muted">No mind map available</p>
-                  </div>
-                )}
+          {/* RIGHT — same shell as record/page.tsx React Flow board when showFlowBoard; pt-20 clears absolute header */}
+          <div className="flex h-full min-h-0 w-1/2 items-center justify-center overflow-hidden pt-20 opacity-0 animate-fade-in-down [animation-delay:0.15s] [animation-fill-mode:forwards]">
+            <div className="flex h-full min-h-0 w-full items-center justify-center p-6 pb-[max(1rem,env(safe-area-inset-bottom,0px))]">
+              <div className="card flex h-full w-full flex-col overflow-hidden">
+                <div className="shrink-0 border-b border-surface-border bg-background-secondary px-6 py-4">
+                  <h2 className="text-lg font-display font-bold text-foreground">Concept Sketch</h2>
+                  <p className="text-sm text-foreground-muted mt-1">Concepts captured from this session</p>
+                </div>
+                <div className="relative min-h-0 flex-1 overflow-hidden bg-background">
+                  {nodes.length > 0 ? (
+                    <ReactFlow nodes={nodes} edges={edges} fitView attributionPosition="bottom-left">
+                      <Background />
+                      <Controls />
+                    </ReactFlow>
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center">
+                      <p className="text-foreground-muted">No mind map available</p>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
