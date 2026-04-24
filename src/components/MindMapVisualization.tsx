@@ -14,18 +14,13 @@ import ReactFlow, {
   BackgroundVariant,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
-
-interface Concept {
-  id?: string;
-  label: string;
-  type: 'main' | 'concept' | 'detail';
-  parent?: string;
-  explanation?: string;
-}
+import type { ConceptPayload } from '@/lib/concept-types';
 
 interface MindMapVisualizationProps {
-  concepts: Concept[];
+  concepts: ConceptPayload[];
 }
+
+const MAP_ROOT_ID = '__map_root__';
 
 export default function MindMapVisualization({ concepts }: MindMapVisualizationProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
@@ -36,26 +31,24 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
     [setEdges]
   );
 
-  // Memoize the expensive layout calculation
   const layoutData = useMemo(() => {
     if (!concepts || concepts.length === 0) {
       return { nodes: [], edges: [] };
     }
 
-    // Estimate node dimensions based on content
-    const estimateNodeWidth = (concept: Concept): number => {
+    const estimateNodeWidth = (concept: ConceptPayload): number => {
       const labelLength = concept.label.length;
-      
+
       if (concept.type === 'main') {
         return Math.max(120, Math.min(200, labelLength * 8 + 40));
-      } else if (concept.type === 'concept') {
-        return Math.max(100, Math.min(180, labelLength * 7 + 30));
-      } else {
-        return Math.max(80, Math.min(160, labelLength * 6 + 25));
       }
+      if (concept.type === 'concept') {
+        return Math.max(100, Math.min(180, labelLength * 7 + 30));
+      }
+      return Math.max(80, Math.min(160, labelLength * 6 + 25));
     };
 
-    const estimateNodeHeight = (concept: Concept): number => {
+    const estimateNodeHeight = (concept: ConceptPayload): number => {
       if (concept.explanation) {
         return concept.type === 'main' ? 70 : concept.type === 'concept' ? 60 : 50;
       }
@@ -65,20 +58,51 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
     const newNodes: Node[] = [];
     const newEdges: Edge[] = [];
     const childrenByParent = new Map<string, string[]>();
-    const widthCache = new Map<string, number>(); // Cache subtree widths
+    const widthCache = new Map<string, number>();
 
-    // First pass: build parent-child relationships
     concepts.forEach((concept) => {
       const nodeId = concept.id || concept.label;
-      const parentId = concept.parent;
-      
-      if (!childrenByParent.has(parentId || 'root')) {
-        childrenByParent.set(parentId || 'root', []);
+
+      const parentKey =
+        concept.parent && String(concept.parent).trim() ? String(concept.parent).trim() : 'root';
+
+      if (!childrenByParent.has(parentKey)) {
+        childrenByParent.set(parentKey, []);
       }
-      childrenByParent.get(parentId || 'root')!.push(nodeId);
+      childrenByParent.get(parentKey)!.push(nodeId);
     });
 
-    // Get node style
+    const rootChildren = childrenByParent.get('root') || [];
+    const rootPos = { x: 320, y: 24 };
+
+    if (rootChildren.length > 0) {
+      newNodes.push({
+        id: MAP_ROOT_ID,
+        type: 'default',
+        position: rootPos,
+        draggable: true,
+        data: {
+          plainLabel: 'Session',
+          label: (
+            <div>
+              <div className="font-semibold text-sm">Session</div>
+              <div className="text-xs opacity-70">Topics</div>
+            </div>
+          ),
+        },
+        style: {
+          background: 'linear-gradient(135deg, #1a1f2b 0%, #12161e 100%)',
+          color: '#f0f2f5',
+          border: '1px solid rgba(255,255,255,0.12)',
+          borderRadius: '12px',
+          padding: '10px 16px',
+          fontSize: '12px',
+          boxShadow: '0 4px 20px rgba(0, 0, 0, 0.25)',
+          cursor: 'grab',
+        },
+      });
+    }
+
     const getNodeStyle = (type: string): Record<string, string | number> => {
       switch (type) {
         case 'main':
@@ -117,7 +141,6 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
       }
     };
 
-    // Calculate subtree widths with caching to avoid recalculation
     const calculateSubtreeWidth = (nodeId: string | null): number => {
       const key = nodeId || 'root';
       if (widthCache.has(key)) {
@@ -128,7 +151,7 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
       let width: number;
 
       if (children.length === 0) {
-        const concept = concepts.find(c => (c.id || c.label) === nodeId);
+        const concept = concepts.find((c) => (c.id || c.label) === nodeId);
         width = concept ? estimateNodeWidth(concept) + 80 : 120;
       } else {
         let totalWidth = 0;
@@ -142,27 +165,32 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
       return width;
     };
 
-    // Position nodes using hierarchical layout
-    const positionNodes = (parentId: string | null, level: number, parentPos: { x: number; y: number } | null, leftBound: number) => {
-      const children = childrenByParent.get(parentId || 'root') || [];
+    const positionNodes = (
+      parentId: string | null,
+      level: number,
+      parentPos: { x: number; y: number } | null,
+      leftBound: number
+    ) => {
+      const key = parentId || 'root';
+      const children = childrenByParent.get(key) || [];
       if (children.length === 0) return leftBound;
-      
+
       let currentX = leftBound;
       const verticalGap = 200;
-      
+      const rootAnchor = rootChildren.length > 0 ? { x: rootPos.x + 40, y: rootPos.y + 50 } : null;
+
       children.forEach((childId, childIndex) => {
-        const concept = concepts.find(c => (c.id || c.label) === childId);
+        const concept = concepts.find((c) => (c.id || c.label) === childId);
         if (!concept) return;
 
-        const nodeWidth = estimateNodeWidth(concept);
         const subtreeWidth = calculateSubtreeWidth(childId);
-        
+
         let position = { x: 0, y: 0 };
 
         if (level === 0) {
           position = {
             x: 150 + childIndex * 700,
-            y: 40,
+            y: rootChildren.length > 0 ? 140 : 40,
           };
           currentX = position.x + subtreeWidth / 2;
         } else if (parentPos) {
@@ -180,6 +208,7 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
           position,
           draggable: true,
           data: {
+            plainLabel: concept.label,
             label: (
               <div>
                 <div className="font-semibold">{concept.label}</div>
@@ -195,7 +224,17 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
           },
         });
 
-        if (concept.parent && parentPos) {
+        const underRoot = key === 'root';
+        if (underRoot && rootAnchor) {
+          newEdges.push({
+            id: `edge-${MAP_ROOT_ID}-${childId}`,
+            source: MAP_ROOT_ID,
+            target: childId,
+            type: 'smoothstep',
+            animated: true,
+            style: { stroke: '#14b8a6', strokeWidth: 2 },
+          });
+        } else if (concept.parent && parentPos) {
           newEdges.push({
             id: `edge-${concept.parent}-${childId}`,
             source: concept.parent,
@@ -209,14 +248,14 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
         const nextLeftBound = level === 0 ? 150 + (childIndex + 1) * 700 : currentX - subtreeWidth;
         positionNodes(childId, level + 1, position, nextLeftBound);
       });
-      
+
       return currentX;
     };
 
     positionNodes(null, 0, null, 0);
 
     return { nodes: newNodes, edges: newEdges };
-  }, [concepts]); // Only recalculate when concepts change
+  }, [concepts]);
 
   useEffect(() => {
     if (!concepts || concepts.length === 0) {
@@ -227,7 +266,7 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
 
     setNodes(layoutData.nodes);
     setEdges(layoutData.edges);
-  }, [layoutData, setNodes, setEdges]);
+  }, [concepts, layoutData, setNodes, setEdges]);
 
   if (!concepts || concepts.length === 0) {
     return (
@@ -235,7 +274,12 @@ export default function MindMapVisualization({ concepts }: MindMapVisualizationP
         <div className="text-center">
           <div className="w-20 h-20 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
             <svg className="w-10 h-10 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"
+              />
             </svg>
           </div>
           <p className="text-foreground font-display font-semibold text-lg">Mind Map</p>

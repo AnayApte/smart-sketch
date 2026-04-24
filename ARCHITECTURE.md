@@ -12,8 +12,8 @@ First, ensure you have the necessary accounts and credentials:
    - Create a new project
    - Note your API key, secret, and WebSocket URL
    
-2. **OpenAI Account**: Get API key at [platform.openai.com](https://platform.openai.com)
-   - You'll need this for AI-powered concept extraction
+2. **Google Gemini**: Create an API key at [Google AI Studio](https://aistudio.google.com/apikey)
+   - Set `GEMINI_API_KEY` in `.env.local` (and `agent/.env` if you run the Python worker)
 
 3. **Configure `.env.local`**:
    ```bash
@@ -23,85 +23,81 @@ First, ensure you have the necessary accounts and credentials:
 
 ### 2. **Understanding the Application Flow**
 
+There are **two** capture paths:
+
+**A. `/record` (primary)** — LiveKit + optional Python agent  
 ```
-User starts lecture session
+User signs in → /home → /record
          ↓
-LiveKit captures video/audio
+Browser: camera/mic (getUserMedia), optional LiveKit publish
          ↓
-Audio is transcribed (currently simulated)
+If Python agent is running: remote audio → Deepgram STT → Gemini concepts → LiveKit data channel (topic smartsketch)
          ↓
-Transcript sent to OpenAI API
+If LiveKit URL missing OR agent never joins (grace period): Web Speech in browser → /api/process-transcript → same mind map
          ↓
-AI extracts key concepts
-         ↓
-Concepts rendered in ReactFlow mind map
+React Flow mind map (addConceptsToMap) + optional Gemini chat + save to Supabase
 ```
+
+**B. `/lecture`** — Browser-first  
+```
+User opens /lecture → LiveKitRoom for preview + Web Speech final transcripts
+         ↓
+Buffered text → /api/process-transcript (Gemini, hierarchical JSON with id/parent)
+         ↓
+MindMapVisualization (React Flow) with a session root node and edges
+```
+
+Shared types for AI output: `src/lib/concept-types.ts` (`ConceptPayload`).
 
 ## 📁 Key Files and Their Purpose
 
 ### **Core Application Files**
 
-#### `src/app/page.tsx` - Home Page
-- Landing page with feature overview
-- Navigation to lecture and demo modes
-- **Customize**: Branding, feature descriptions, getting started instructions
+#### `src/app/page.tsx` - Marketing / auth landing
+- Landing hero and embedded `AuthForm` (sign in / sign up)
+- **After login**, users go to `/home` (not lecture from this page alone)
 
-#### `src/app/lecture/page.tsx` - Main Lecture Interface
-- Split-screen layout: video/audio on left, mind map on right
+#### `src/app/home/page.tsx` - Signed-in hub
+- Links to `/record`, `/library`, and `/lecture`
+
+#### `src/app/record/page.tsx` - Primary recording session
+- LiveKit connect + publish tracks; `DataReceived` → concepts
+- Browser STT fallback when LiveKit is off or `allowStartWithoutAgent` is true
+- **Customize**: layout, batching interval (local STT uses 10s), mind map styling
+
+#### `src/app/lecture/page.tsx` - Lecture / browser STT UI
+- Split-screen: `LiveKitCapture` + `MindMapVisualization`
 - Session start/stop controls
 - **Customize**: Layout, additional controls, recording features
 
 #### `src/app/demo/page.tsx` - Interactive Demo
 - Step-by-step demonstration of concept building
-- No LiveKit/OpenAI required
+- No LiveKit/Gemini required
 - **Customize**: Demo data, visualization examples
 
 ### **Component Files**
 
-#### `src/components/LiveKitCapture.tsx` - Video/Audio Capture
-**Purpose**: Handles LiveKit connection and media streaming
+#### `src/components/LiveKitCapture.tsx` - Video/Audio Capture (lecture page)
+**Purpose**: LiveKit token + room, **Web Speech API** for finals-only captions, periodic `/api/process-transcript`
 
 **Key Functions**:
-- `fetchToken()` - Gets LiveKit access token
-- `handleTranscript()` - Processes transcribed audio
-- `simulateTranscript()` - Demo mode without real streaming
+- `fetchToken()` — LiveKit access token (`authFetch`)
+- `handleTranscript()` — buffers text, starts 10s interval to call the API
+- `simulateTranscript()` — demo lines for testing (interval cleared on unmount)
 
-**Where to Start**:
-- Line 52: Add real speech-to-text integration
-- Line 76: Customize transcript processing interval
-- Line 90: Add custom audio processing logic
+#### `src/components/MindMapVisualization.tsx` - Mind Map Rendering (lecture page)
+**Purpose**: Builds React Flow nodes/edges from `ConceptPayload[]` (including `parent` links). Inserts a small **Session** root node and edges from it for top-level concepts.
 
-#### `src/components/MindMapVisualization.tsx` - Mind Map Rendering
-**Purpose**: Transforms concepts into visual node graph
-
-**Key Functions**:
-- `useEffect()` - Converts concepts to nodes/edges
-- Node positioning algorithm (lines 40-80)
-- Node styling based on type (lines 60-90)
-
-**Where to Start**:
-- Line 48: Modify layout algorithm (radial, tree, hierarchical)
-- Line 70: Customize node styles and colors
-- Line 145: Add custom node interactions
+#### `agent/main.py` - LiveKit worker
+**Purpose**: Subscribes to published **audio**, streams frames to **Deepgram**, batches finals, calls **Gemini**, `publish_data` topic `smartsketch`. Env: `agent/.env` (`DEEPGRAM_API_KEY`, `GEMINI_API_KEY`, LiveKit).
 
 ### **API Routes**
 
 #### `src/app/api/livekit/token/route.ts`
-**Purpose**: Generates LiveKit access tokens
-
-**Security Note**: Tokens grant room access. Customize permissions at line 25.
-
-**Where to Start**:
-- Line 27: Add custom room permissions
-- Add user authentication before token generation
+**Purpose**: Authenticated LiveKit access tokens (`getAuthenticatedUser`).
 
 #### `src/app/api/process-transcript/route.ts`
-**Purpose**: Sends transcripts to OpenAI for concept extraction
-
-**Key Customization Points**:
-- Line 32: Modify AI prompt for different concept extraction
-- Line 45: Adjust temperature/max_tokens for AI response
-- Line 53: Add custom concept parsing logic
+**Purpose**: Authenticated transcript → **Gemini** (default `gemini-2.0-flash`, override with `GEMINI_MODEL`) JSON with **hierarchical** `concepts` (`id`, `label`, `type`, `explanation`, `parent`). Normalizes missing ids/parents server-side.
 
 ### **Utility Files**
 
@@ -254,7 +250,7 @@ const MainNode = ({ data }) => (
 
 - **LiveKit Docs**: https://docs.livekit.io
 - **ReactFlow Docs**: https://reactflow.dev/learn
-- **OpenAI API**: https://platform.openai.com/docs
+- **Gemini API**: https://ai.google.dev/docs
 - **Next.js Docs**: https://nextjs.org/docs
 
 ## 🐛 Troubleshooting
@@ -268,10 +264,10 @@ const MainNode = ({ data }) => (
 - Verify API key and secret are correct
 - Test connection at livekit.io console
 
-### "OpenAI API error"
-- Verify API key is valid
-- Check API usage limits
-- Ensure billing is set up
+### "Gemini API key not configured" / model errors
+- Use the exact name **`GEMINI_API_KEY`** in `.env.local` (and `agent/.env` for the worker); restart Next.js after edits
+- **`GEMINI_MODEL`**: preferred first model; on **quota / rate limit** the app tries additional models automatically (same defaults in Next.js and `agent/main.py`).
+- **`GEMINI_MODEL_FALLBACKS`**: comma-separated models after the primary; **`GEMINI_MODEL_CHAIN`**: optional full ordered list (overrides primary + fallbacks).
 
 ### Mind map nodes overlap
 - Adjust position calculations in `MindMapVisualization.tsx`

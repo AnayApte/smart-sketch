@@ -8,7 +8,7 @@ This is a Python program that runs on a server (or your computer) and does the f
 2. LISTENS to the audio being streamed (the professor's voice)
 3. TRANSCRIBES the audio using Deepgram (speech → text)
 4. BATCHES transcripts every 30 seconds
-5. SENDS transcripts to OpenAI to extract key concepts
+5. SENDS transcripts to Gemini to extract key concepts
 6. SENDS the concepts back to your React app via Data Channel
 
 Think of this agent as an invisible participant in the room who's really good at
@@ -22,7 +22,7 @@ HOW IT WORKS:
 - The agent subscribes to the audio track (listens to the mic)
 - Audio frames are sent to Deepgram in real-time
 - Deepgram returns text as people speak
-- Every 30 seconds, we take all the text and ask OpenAI to find key concepts
+- Every 30 seconds, we take all the text and ask Gemini to find key concepts
 - Those concepts get sent to your React app to update the mind map
 
 TO RUN THIS:
@@ -39,7 +39,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 # Load environment variables from .env file
 # This MUST happen before importing LiveKit plugins that need API keys
@@ -57,10 +57,69 @@ from livekit.agents import (
 )
 from livekit.agents.stt import SpeechEvent, SpeechEventType
 from livekit.plugins import deepgram
-import openai as openai_client
+import google.generativeai as genai
 
 # How often to batch transcripts and extract concepts (in seconds)
 BATCH_INTERVAL_SECONDS = 5
+
+_DEFAULT_GEMINI_PRIMARY = "gemini-2.0-flash"
+# When GEMINI_MODEL_CHAIN / GEMINI_MODEL_FALLBACKS are unset, try these after the primary (same order as Next.js `gemini-fallback.ts`).
+_FREE_TIER_MODEL_TAIL = [
+    "gemini-2.5-flash",
+    "gemini-3-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+]
+
+
+def _dedupe_models(models: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for m in models:
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        out.append(m)
+    return out
+
+
+def _parse_comma_models(raw: str) -> List[str]:
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def gemini_model_chain() -> List[str]:
+    chain_env = os.getenv("GEMINI_MODEL_CHAIN", "").strip()
+    if chain_env:
+        return _dedupe_models(_parse_comma_models(chain_env))
+    primary = os.getenv("GEMINI_MODEL", _DEFAULT_GEMINI_PRIMARY).strip() or _DEFAULT_GEMINI_PRIMARY
+    extra_raw = os.getenv("GEMINI_MODEL_FALLBACKS", "").strip()
+    extra = _parse_comma_models(extra_raw) if extra_raw else []
+    tail = [m for m in _FREE_TIER_MODEL_TAIL if m != primary and m not in extra]
+    return _dedupe_models([primary, *extra, *tail])
+
+
+def _is_gemini_quota_or_rate_limit(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    if any(
+        k in msg
+        for k in (
+            "resource_exhausted",
+            "resource exhausted",
+            "quota",
+            "rate limit",
+            "too many requests",
+        )
+    ):
+        return True
+    if "429" in msg:
+        return True
+    try:
+        from google.api_core import exceptions as google_exc
+
+        return isinstance(exc, (google_exc.ResourceExhausted, google_exc.TooManyRequests))
+    except ImportError:
+        return False
 
 
 class TranscriptProcessor:
@@ -68,7 +127,7 @@ class TranscriptProcessor:
     This class collects transcript pieces and processes them in batches.
 
     Why batch? Because:
-    - We don't want to call OpenAI for every single word
+    - We don't want to call Gemini for every single word
     - 30 seconds of lecture content gives enough context for meaningful concepts
     - It reduces API costs and provides better concept extraction
     """
@@ -83,10 +142,6 @@ class TranscriptProcessor:
 
         # Full transcript for the entire session (for later review)
         self.full_transcript: List[str] = []
-
-        # OpenAI client for concept extraction
-        # This uses the OPENAI_API_KEY environment variable automatically
-        self.openai = openai_client.AsyncOpenAI()
 
         # Track when we last processed a batch
         self.last_batch_time = datetime.now()
@@ -131,7 +186,7 @@ class TranscriptProcessor:
     async def process_batch(self):
         """
         Takes all the transcript pieces collected in the last 5 seconds,
-        combines them, sends to OpenAI for concept extraction, and
+        combines them, sends to Gemini for concept extraction, and
         sends the results back to the React app.
         """
         # Set flag to prevent duplicate batches
@@ -153,9 +208,9 @@ class TranscriptProcessor:
 
             print(f"[BATCH] Processing {len(batch_text)} characters of transcript: {batch_text[:100]}...")
 
-            # Ask OpenAI to extract concepts from the transcript
+            # Ask Gemini to extract concepts from the transcript
             concepts = await self.extract_concepts(batch_text)
-            print(f"[BATCH] OpenAI returned {len(concepts)} concepts")
+            print(f"[BATCH] Gemini returned {len(concepts)} concepts")
 
             # Send concepts back to the React app via Data Channel
             await self.send_to_frontend(concepts, batch_text)
@@ -173,7 +228,7 @@ class TranscriptProcessor:
 
     async def extract_concepts(self, transcript: str) -> List[dict]:
         """
-        Sends the transcript to OpenAI and asks it to extract key concepts
+        Sends the transcript to Gemini and asks it to extract key concepts
         with rich hierarchical parent-child relationships for complex mind maps.
 
         Returns a list of concepts with proper parent-child relationships where:
@@ -193,7 +248,7 @@ class TranscriptProcessor:
         ]
         """
 
-        # The prompt that tells OpenAI what to do
+        # The prompt that tells the model what to do
         prompt = f"""You are an expert educational assistant creating a RICH HIERARCHICAL concept map from a lecture transcript.
 
 Your task: Extract key concepts and organize them into a complex tree structure showing how ideas relate to each other.
@@ -248,39 +303,69 @@ Return ONLY valid JSON array with no markdown formatting:
 Transcript to analyze:
 {transcript}"""
 
-        try:
-            # Call OpenAI API
-            response = await self.openai.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are an expert at creating hierarchical concept maps from educational content. Extract specific domain concepts and organize them into meaningful parent-child relationships. Return only valid JSON arrays."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.5,  # Lower temp for more consistent structure
-                max_tokens=800    # More tokens for hierarchical data
-            )
-
-            # Get the response text
-            response_text = response.choices[0].message.content.strip()
-
-            # Try to parse as JSON
-            # Sometimes the model wraps it in ```json``` blocks
-            if response_text.startswith("```"):
-                response_text = response_text.split("```")[1]
-                if response_text.startswith("json"):
-                    response_text = response_text[4:]
-                response_text = response_text.strip()
-
-            concepts = json.loads(response_text)
-            print(f"[CONCEPTS] Extracted {len(concepts)} concepts")
-            return concepts
-
-        except json.JSONDecodeError as e:
-            print(f"[WARNING] Could not parse OpenAI response as JSON: {e}")
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            print("[ERROR] GEMINI_API_KEY not set; skipping concept extraction")
             return []
-        except Exception as e:
-            print(f"[ERROR] OpenAI API error: {e}")
-            return []
+
+        genai.configure(api_key=api_key)
+
+        system = (
+            "You are an expert at creating hierarchical concept maps from educational content. "
+            "Extract specific domain concepts and organize them into meaningful parent-child relationships. "
+            "Return only a valid JSON array (no wrapper object, no markdown)."
+        )
+        full_input = f"{system}\n\n{prompt}"
+
+        models_to_try = gemini_model_chain()
+        last_error: Optional[Exception] = None
+
+        for idx, model_name in enumerate(models_to_try):
+            try:
+                model = genai.GenerativeModel(
+                    model_name,
+                    generation_config=genai.GenerationConfig(
+                        temperature=0.5,
+                        max_output_tokens=800,
+                        response_mime_type="application/json",
+                    ),
+                )
+
+                def _generate():
+                    return model.generate_content(full_input)
+
+                response = await asyncio.to_thread(_generate)
+                response_text = (response.text or "").strip()
+
+                if response_text.startswith("```"):
+                    response_text = response_text.split("```")[1]
+                    if response_text.startswith("json"):
+                        response_text = response_text[4:]
+                    response_text = response_text.strip()
+
+                concepts = json.loads(response_text)
+                if not isinstance(concepts, list):
+                    print("[WARNING] Gemini returned JSON that is not an array")
+                    return []
+                print(f"[CONCEPTS] Extracted {len(concepts)} concepts (model={model_name})")
+                return concepts
+
+            except json.JSONDecodeError as e:
+                print(f"[WARNING] Could not parse Gemini response as JSON: {e}")
+                return []
+            except Exception as e:
+                last_error = e
+                can_try_next = idx < len(models_to_try) - 1 and _is_gemini_quota_or_rate_limit(e)
+                if can_try_next:
+                    nxt = models_to_try[idx + 1]
+                    print(f"[Gemini] Model {model_name!r} quota/rate limit; trying {nxt!r}… ({e})")
+                    continue
+                print(f"[ERROR] Gemini API error: {e}")
+                return []
+
+        if last_error:
+            print(f"[ERROR] Gemini API error (exhausted model chain): {last_error}")
+        return []
 
     async def send_to_frontend(self, concepts: List[dict], transcript: str):
         """
@@ -500,17 +585,16 @@ if __name__ == "__main__":
     """
     Entry point when you run: python main.py dev
 
-    The 'cli.run_app' function:
-    - Connects to your LiveKit project
-    - Listens for new rooms being created
-    - Automatically spawns an agent for each room
-
-    In "dev" mode, it joins every room. In production, you'd configure
-    which rooms the agent should join.
+    The 'cli.run_app' function registers this worker with LiveKit (see agent_name).
+    The Next.js app embeds the same name in each participant JWT's roomConfig so
+    LiveKit dispatches this worker when a new room is created (first join).
     """
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
+            # Must match SMARTSKETCH_AGENT_NAME in Next.js `src/app/api/livekit/token/route.ts`
+            # so the access token's roomConfig dispatches this worker to new rooms.
+            agent_name="smartsketch-worker",
         )
     )

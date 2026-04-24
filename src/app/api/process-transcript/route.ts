@@ -1,17 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
 import { getAuthenticatedUser } from '@/lib/api-auth';
 import { rateLimitExceeded } from '@/lib/rate-limit';
-
-type Concept = {
-  label: string;
-  type: 'main' | 'concept' | 'detail';
-  explanation?: string;
-};
+import type { ConceptPayload, ConceptType } from '@/lib/concept-types';
+import { geminiApiKey } from '@/lib/gemini-config';
+import { withGeminiModelFallback } from '@/lib/gemini-fallback';
 
 const TRANSCRIPT_MAX = 50_000;
 
-function parseConceptsJson(content: string | null): Concept[] {
+function normalizeType(t: unknown): ConceptType {
+  return t === 'main' || t === 'concept' || t === 'detail' ? t : 'concept';
+}
+
+function assignIdsAndParents(raw: ConceptPayload[]): ConceptPayload[] {
+  const used = new Set<string>();
+  const withIds = raw.map((c, i) => {
+    let id = (c.id && String(c.id).trim()) || `c${i + 1}`;
+    let n = 0;
+    while (used.has(id)) {
+      n += 1;
+      id = `c${i + 1}_${n}`;
+    }
+    used.add(id);
+    const parent = c.parent === undefined || c.parent === '' ? null : String(c.parent).trim() || null;
+    return { ...c, id, parent };
+  });
+
+  const idSet = new Set(withIds.map((c) => c.id));
+  const mains = withIds.filter((c) => c.type === 'main');
+
+  return withIds.map((c) => {
+    let parent = c.parent ?? null;
+    if (parent && !idSet.has(parent)) {
+      parent = mains[0]?.id ?? null;
+    }
+    if (!parent && c.type !== 'main' && mains.length > 0) {
+      parent = mains[0].id;
+    }
+    return { ...c, parent };
+  });
+}
+
+function parseConceptsJson(content: string | null): ConceptPayload[] {
   if (!content?.trim()) return [];
   let text = content.trim();
   if (text.startsWith('```')) {
@@ -24,17 +53,28 @@ function parseConceptsJson(content: string | null): Concept[] {
   try {
     const parsed = JSON.parse(text) as { concepts?: unknown };
     if (!Array.isArray(parsed.concepts)) return [];
-    return parsed.concepts
+    const raw = parsed.concepts
       .filter((c): c is Record<string, unknown> => c !== null && typeof c === 'object')
-      .map((c): Concept => {
-        const t = c.type === 'main' || c.type === 'concept' || c.type === 'detail' ? c.type : 'concept';
+      .map((c): ConceptPayload => {
+        const t = normalizeType(c.type);
+        const parentRaw = c.parent;
+        const parent =
+          parentRaw === null || parentRaw === undefined
+            ? null
+            : typeof parentRaw === 'string'
+              ? parentRaw.trim() || null
+              : null;
         return {
+          id: typeof c.id === 'string' ? c.id.trim() : undefined,
           label: String(c.label ?? '').trim() || 'Concept',
           type: t,
           explanation: typeof c.explanation === 'string' ? c.explanation : undefined,
+          parent,
         };
       })
       .filter((c) => c.label.length > 0);
+
+    return assignIdsAndParents(raw);
   } catch {
     return [];
   }
@@ -69,45 +109,42 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = geminiApiKey();
 
     if (!apiKey) {
-      return NextResponse.json({ error: 'OpenAI API key not configured' }, { status: 500 });
+      return NextResponse.json({ error: 'Gemini API key not configured' }, { status: 500 });
     }
 
-    const openai = new OpenAI({ apiKey });
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: `You extract key concepts from lecture transcripts. Respond with a single JSON object of this exact shape (no markdown, no extra keys):
-{"concepts":[{"label":"short phrase","type":"main|concept|detail","explanation":"optional brief text"}]}
+    const result = await withGeminiModelFallback(apiKey, async (modelName, genAI) => {
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction: `You extract key concepts from lecture transcripts. Respond with a single JSON object (no markdown):
+{"concepts":[{"id":"c1","label":"short phrase","type":"main|concept|detail","explanation":"optional brief text","parent":null or "c1"}]}
 Rules:
-- "type" must be exactly one of: main, concept, detail
-- Prefer 3–8 concepts per segment
-- Labels are 2–6 words, domain-specific when possible`,
+- Each concept MUST have a unique "id" (c1, c2, …).
+- "type" must be exactly: main, concept, or detail.
+- "parent" is the parent's "id", or null for root topics (type "main" roots use parent null).
+- Non-main concepts MUST have "parent" set to the id of the concept they support (usually a main or intermediate concept).
+- Prefer 3–8 concepts per segment; labels 2–6 words, domain-specific when possible.`,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.5,
+          maxOutputTokens: 1200,
         },
-        {
-          role: 'user',
-          content: `Transcript segment:\n${transcript.slice(0, 12000)}`,
-        },
-      ],
-      temperature: 0.5,
-      max_tokens: 800,
+      });
+      return model.generateContent(`Transcript segment:\n${transcript.slice(0, 12000)}`);
     });
-
-    const content = completion.choices[0]?.message?.content;
+    const content = result.response.text();
     let concepts = parseConceptsJson(content ?? null);
 
     if (concepts.length === 0) {
       concepts = [
         {
+          id: 'c1',
           label: transcript.slice(0, 50).trim() || 'Segment',
           type: 'concept',
           explanation: transcript.slice(0, 500),
+          parent: null,
         },
       ];
     }

@@ -5,10 +5,11 @@ import LiveKitCapture from '@/components/LiveKitCapture';
 import MindMapVisualization from '@/components/MindMapVisualization';
 import Link from 'next/link';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
+import type { ConceptPayload } from '@/lib/concept-types';
 
 export default function LecturePage() {
   const [isSessionActive, setIsSessionActive] = useState(false);
-  const [conceptData, setConceptData] = useState<any[]>([]);
+  const [conceptData, setConceptData] = useState<ConceptPayload[]>([]);
 
   const handleStartSession = () => {
     setIsSessionActive(true);
@@ -18,8 +19,8 @@ export default function LecturePage() {
     setIsSessionActive(false);
   };
 
-  const handleConceptExtracted = (concept: any) => {
-    setConceptData(prev => [...prev, concept]);
+  const handleConceptExtracted = (concept: ConceptPayload) => {
+    setConceptData((prev) => [...prev, concept]);
   };
 
   return (

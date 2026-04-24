@@ -90,7 +90,7 @@ export default function SessionPage() {
       });
 
       if (!res.ok) {
-        let errDetails = 'Gemini request failed';
+        let errDetails = 'Chat request failed';
         try {
           const errJson = await res.json();
           errDetails = errJson?.details || errJson?.error || errDetails;
@@ -107,10 +107,11 @@ export default function SessionPage() {
       ]);
     } catch (error) {
       const message = (error as any)?.message || 'Unknown error';
-      console.error('Gemini chat client error:', message);
-      const friendly = message.includes('Missing GEMINI_API_KEY')
-        ? 'Gemini API key is missing. Add GEMINI_API_KEY to .env.local and restart the dev server.'
-        : `Sorry, I ran into an issue: ${message}`;
+      console.error('Sketch chat client error:', message);
+      const friendly =
+        message.includes('Gemini API key') || message.includes('not configured')
+          ? 'Gemini API key is missing. Add GEMINI_API_KEY to .env.local and restart the dev server.'
+          : `Sorry, I ran into an issue: ${message}`;
       setChatMessages((prev) => [
         ...prev,
         { role: 'assistant', content: friendly },
@@ -210,7 +211,7 @@ export default function SessionPage() {
             {/* Chat Section - Bottom 2/3 */}
             <div className="h-2/3 card flex flex-col overflow-hidden opacity-0 animate-fade-in-up [animation-delay:0.3s] [animation-fill-mode:forwards]">
               <div className="px-6 py-4 border-b border-surface-border bg-background-secondary">
-                <h2 className="text-sm font-display font-bold text-foreground uppercase tracking-wider">Sketch Discussion</h2>
+                <h2 className="text-sm font-display font-bold text-foreground uppercase tracking-wider">Session Chat</h2>
                 <p className="text-xs text-foreground-muted mt-1">Ask questions about this session</p>
               </div>
 
@@ -248,7 +249,7 @@ export default function SessionPage() {
                 {isSending && (
                   <div className="flex justify-start">
                     <div className="max-w-[75%] rounded-xl px-4 py-2.5 text-sm bg-background-secondary text-foreground border border-surface-border opacity-80 animate-pulse">
-                      Gemini is thinking...
+                      Assistant is thinking...
                     </div>
                   </div>
                 )}

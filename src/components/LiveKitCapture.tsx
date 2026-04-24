@@ -3,10 +3,11 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { LiveKitRoom, VideoTrack, AudioTrack } from '@livekit/components-react';
 import { authFetch } from '@/lib/auth-fetch';
+import type { ConceptPayload } from '@/lib/concept-types';
 
 interface LiveKitCaptureProps {
   isActive: boolean;
-  onConceptExtracted: (concept: any) => void;
+  onConceptExtracted: (concept: ConceptPayload) => void;
 }
 
 type SpeechRecognitionResultEvent = {
@@ -35,7 +36,10 @@ export default function LiveKitCapture({ isActive, onConceptExtracted }: LiveKit
   const [error, setError] = useState<string>('');
   const [speechSupported, setSpeechSupported] = useState(false);
   const transcriptBufferRef = useRef<string>('');
-  const processingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const processingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const simulateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Fresh room per activation so JWT agent dispatch is not skipped (token roomConfig applies only on room creation). */
+  const captureRoomRef = useRef<string>('');
 
   const handleTranscript = useCallback(async (text: string) => {
     transcriptBufferRef.current += ' ' + text;
@@ -53,8 +57,10 @@ export default function LiveKitCapture({ isActive, onConceptExtracted }: LiveKit
             });
 
             if (response.ok) {
-              const { concepts } = await response.json();
-              concepts.forEach((concept: unknown) => onConceptExtracted(concept));
+              const { concepts } = (await response.json()) as { concepts?: ConceptPayload[] };
+              if (Array.isArray(concepts)) {
+                concepts.forEach((concept) => onConceptExtracted(concept));
+              }
               transcriptBufferRef.current = '';
             }
           } catch (err) {
@@ -116,8 +122,11 @@ export default function LiveKitCapture({ isActive, onConceptExtracted }: LiveKit
   }, [isActive, token, handleTranscript]);
 
   useEffect(() => {
-    if (isActive && !token) {
-      fetchToken();
+    if (!isActive) {
+      captureRoomRef.current = '';
+      setToken('');
+    } else if (!token) {
+      void fetchToken();
     }
 
     return () => {
@@ -128,12 +137,28 @@ export default function LiveKitCapture({ isActive, onConceptExtracted }: LiveKit
     };
   }, [isActive, token]);
 
+  useEffect(() => {
+    return () => {
+      if (simulateIntervalRef.current) {
+        clearInterval(simulateIntervalRef.current);
+        simulateIntervalRef.current = null;
+      }
+    };
+  }, []);
+
   const fetchToken = async () => {
     setConnecting(true);
     setError('');
-    
+
     try {
-      const response = await authFetch('/api/livekit/token?room=lecture-room&username=presenter');
+      if (!captureRoomRef.current) {
+        captureRoomRef.current = `capture-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+      }
+      const room = captureRoomRef.current;
+      const username = `presenter-${Math.random().toString(36).slice(2, 9)}`;
+      const response = await authFetch(
+        `/api/livekit/token?room=${encodeURIComponent(room)}&username=${encodeURIComponent(username)}`
+      );
       
       if (!response.ok) {
         throw new Error('Failed to fetch token');
@@ -150,26 +175,29 @@ export default function LiveKitCapture({ isActive, onConceptExtracted }: LiveKit
   };
 
   const simulateTranscript = () => {
-    // Simulated transcript for demo purposes
+    if (simulateIntervalRef.current) {
+      clearInterval(simulateIntervalRef.current);
+      simulateIntervalRef.current = null;
+    }
+
     const sampleTranscripts = [
       'Today we will discuss React components',
       'Components are the building blocks of React applications',
       'There are two types: functional and class components',
       'State management is crucial in React',
-      'Hooks allow us to use state in functional components'
+      'Hooks allow us to use state in functional components',
     ];
-    
+
     let index = 0;
-    const interval = setInterval(() => {
+    simulateIntervalRef.current = setInterval(() => {
       if (index < sampleTranscripts.length) {
-        handleTranscript(sampleTranscripts[index]);
+        void handleTranscript(sampleTranscripts[index]);
         index++;
-      } else {
-        clearInterval(interval);
+      } else if (simulateIntervalRef.current) {
+        clearInterval(simulateIntervalRef.current);
+        simulateIntervalRef.current = null;
       }
     }, 5000);
-
-    return () => clearInterval(interval);
   };
 
   if (!isActive) {

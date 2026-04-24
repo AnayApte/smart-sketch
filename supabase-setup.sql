@@ -6,33 +6,35 @@ CREATE TABLE IF NOT EXISTS sessions (
   transcript TEXT NOT NULL,
   mind_map_nodes JSONB NOT NULL DEFAULT '[]'::jsonb,
   mind_map_edges JSONB NOT NULL DEFAULT '[]'::jsonb,
+  audio_file_url TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Create index on user_id for faster queries
-CREATE INDEX idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX idx_sessions_created_at ON sessions(created_at DESC);
+-- Backfill column if this script ran before audio_file_url existed
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS audio_file_url TEXT;
 
--- Enable Row Level Security (RLS)
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at DESC);
+
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 
--- Policy: Users can only see their own sessions
+DROP POLICY IF EXISTS "Users can view their own sessions" ON sessions;
 CREATE POLICY "Users can view their own sessions"
   ON sessions FOR SELECT
   USING (auth.uid() = user_id);
 
--- Policy: Users can only insert their own sessions
+DROP POLICY IF EXISTS "Users can insert their own sessions" ON sessions;
 CREATE POLICY "Users can insert their own sessions"
   ON sessions FOR INSERT
   WITH CHECK (auth.uid() = user_id);
 
--- Policy: Users can only update their own sessions
+DROP POLICY IF EXISTS "Users can update their own sessions" ON sessions;
 CREATE POLICY "Users can update their own sessions"
   ON sessions FOR UPDATE
   USING (auth.uid() = user_id);
 
--- Policy: Users can only delete their own sessions
+DROP POLICY IF EXISTS "Users can delete their own sessions" ON sessions;
 CREATE POLICY "Users can delete their own sessions"
   ON sessions FOR DELETE
   USING (auth.uid() = user_id);

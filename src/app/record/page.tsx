@@ -13,14 +13,38 @@ import { useAuth } from '@/lib/auth-context';
 import NeuralNetworkBackground from '@/components/NeuralNetworkBackground';
 import { findSimilarConcept } from '@/lib/concept-dedup';
 import { authFetch } from '@/lib/auth-fetch';
+import type { ConceptPayload } from '@/lib/concept-types';
 
-// Types for agent messages
-interface ConceptData {
-  id?: string;  // Unique ID from agent (e.g., "c1", "c2")
-  label: string;
-  type: 'main' | 'concept' | 'detail';
-  explanation?: string;
-  parent?: string | null;  // Parent concept ID, or null for main topics
+type ConceptData = ConceptPayload;
+
+type SpeechRecognitionResultEvent = {
+  resultIndex: number;
+  results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }>;
+};
+
+type BrowserSpeechRecognition = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  onresult: ((event: SpeechRecognitionResultEvent) => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+};
+
+type WindowWithSpeech = Window & {
+  SpeechRecognition?: new () => BrowserSpeechRecognition;
+  webkitSpeechRecognition?: new () => BrowserSpeechRecognition;
+};
+
+function getNodePlainLabel(node: Node): string {
+  const d = node.data as { plainLabel?: string; label?: unknown };
+  if (typeof d.plainLabel === 'string' && d.plainLabel.trim()) return d.plainLabel.trim();
+  if (typeof d.label === 'string') return d.label.trim();
+  const ch = (d.label as { props?: { children?: unknown[] } })?.props?.children;
+  const first = Array.isArray(ch) ? ch[0] : null;
+  const text = (first as { props?: { children?: string } })?.props?.children;
+  return typeof text === 'string' ? text.trim() : '';
 }
 
 interface AgentMessage {
@@ -42,6 +66,8 @@ export default function RecordPage() {
   const { user } = useAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
   const roomRef = useRef<Room | null>(null);
+  /** Bumped on each full reconnect so stale `room.connect()` resolutions cannot flip React state. */
+  const liveKitConnectGenerationRef = useRef(0);
 
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -60,7 +86,6 @@ export default function RecordPage() {
   }[]>([]);
   const [recordingEnded, setRecordingEnded] = useState(false);
   const [isChatSending, setIsChatSending] = useState(false);
-  const chatMessagesRef = useRef<HTMLDivElement | null>(null);
   const [showHomeModal, setShowHomeModal] = useState(false);
   const [homeModalMode, setHomeModalMode] = useState<'active' | 'ended'>('active');
   const [recordingTitle, setRecordingTitle] = useState('');
@@ -87,7 +112,7 @@ export default function RecordPage() {
   const [nodes, setNodes] = useState<Node[]>([
     {
       id: 'center',
-      data: { label: 'Lecture' },
+      data: { label: 'Lecture', plainLabel: 'Lecture' },
       position: { x: 250, y: 200 },
       style: {
         background: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
@@ -113,104 +138,87 @@ export default function RecordPage() {
     new Map([['center', { x: 250, y: 200, childCount: 0 }]])
   );
   const nodeCounterRef = useRef(0);
+  const nodesRef = useRef<Node[]>([]);
+  const localSttBufferRef = useRef('');
+  const localSttIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const speechRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
 
   // Add multiple concepts to the mind map with proper hierarchy
   const addConceptsToMap = useCallback((concepts: ConceptData[]) => {
-    // Colors based on concept type
     const colors = {
       main: { bg: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)', border: '#0d9488', text: '#0c0f14' },
       concept: { bg: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', border: '#d97706', text: '#0c0f14' },
       detail: { bg: 'linear-gradient(135deg, #1a1f2b 0%, #12161e 100%)', border: 'rgba(255,255,255,0.1)', text: '#f0f2f5' },
     };
 
-    const newNodes: Node[] = [];
-    const newEdges: Edge[] = [];
-
-    // Build map of existing nodes by label for deduplication
+    const prevNodes = nodesRef.current;
     const existingNodesByLabel = new Map<string, string>();
-    setNodes((prevNodes) => {
-      prevNodes.forEach((node) => {
-        if (node.id !== 'center') {
-          // Extract label from node data
-          const nodeLabel = typeof node.data.label === 'string' ? node.data.label : node.data.label?.props?.children?.[0]?.props?.children || '';
-          if (nodeLabel) {
-            existingNodesByLabel.set(nodeLabel, node.id);
-          }
-        }
-      });
-      return prevNodes;
+    prevNodes.forEach((node) => {
+      if (node.id === 'center') return;
+      const nodeLabel = getNodePlainLabel(node);
+      if (nodeLabel) existingNodesByLabel.set(nodeLabel, node.id);
     });
 
-    // Map of original concept IDs to canonical (deduplicated) IDs
+    const newNodes: Node[] = [];
+    const newEdges: Edge[] = [];
     const conceptIdMapping = new Map<string, string>();
 
-    // Sort concepts: main topics first, then concepts, then details
-    // This ensures parents are created before children
     const sortedConcepts = [...concepts].sort((a, b) => {
       const order = { main: 0, concept: 1, detail: 2 };
       return order[a.type] - order[b.type];
     });
 
-    sortedConcepts.forEach((concept) => {
-      const agentId = concept.id || `concept-${nodeCounterRef.current}`;
+    sortedConcepts.forEach((concept, idx) => {
+      const agentKey = (concept.id && String(concept.id).trim()) || `__idx${idx}`;
 
-      // Check if a similar concept already exists
       const similarNodeId = findSimilarConcept(
         concept.label,
         Array.from(existingNodesByLabel.entries()).map(([label, id]) => ({ id, label })),
-        0.75 // 75% similarity threshold
+        0.75
       );
 
       if (similarNodeId) {
-        // Map this concept to the existing similar one
-        conceptIdMapping.set(agentId, similarNodeId);
+        conceptIdMapping.set(agentKey, similarNodeId);
         console.log(`[DEDUP] Merged "${concept.label}" with existing "${similarNodeId}"`);
         return;
       }
 
-      // Check if we already have this exact node ID
-      if (nodePositionsRef.current.has(agentId) || similarNodeId) {
-        console.log(`[DEDUP] Skipped duplicate: ${agentId}`);
-        return;
-      }
+      const nodeId = `n${++nodeCounterRef.current}`;
+      conceptIdMapping.set(agentKey, nodeId);
+      existingNodesByLabel.set(concept.label, nodeId);
 
-      nodeCounterRef.current += 1;
-      const nodeId = agentId;
-
-      // Map new concept ID
-      conceptIdMapping.set(agentId, nodeId);
-
-      // Determine parent node ID (use mapped ID if parent was deduplicated)
       let parentId = 'center';
       if (concept.parent) {
-        parentId = conceptIdMapping.get(concept.parent) || concept.parent;
+        parentId =
+          conceptIdMapping.get(concept.parent) ||
+          (nodePositionsRef.current.has(concept.parent) ? concept.parent : 'center');
       } else if (concept.type === 'main') {
         parentId = 'center';
       }
 
-      // Get parent position
       const parentPos = nodePositionsRef.current.get(parentId) || { x: 250, y: 200, childCount: 0 };
 
-      // Calculate position based on parent and hierarchy level
-      let x: number, y: number;
+      let x: number;
+      let y: number;
       const childIndex = parentPos.childCount;
 
       if (concept.type === 'main') {
-        // Main topics spread horizontally from center
-        const angle = (childIndex * Math.PI / 3) - Math.PI / 2; // Start from top
+        const angle = (childIndex * Math.PI) / 3 - Math.PI / 2;
         const radius = 180;
         x = parentPos.x + radius * Math.cos(angle);
         y = parentPos.y + radius * Math.sin(angle);
       } else if (concept.type === 'concept') {
-        // Concepts branch outward from their parent
         const baseAngle = Math.atan2(parentPos.y - 200, parentPos.x - 250);
-        const spread = Math.PI / 4; // 45 degree spread
+        const spread = Math.PI / 4;
         const angle = baseAngle + (childIndex - parentPos.childCount / 2) * spread;
         const radius = 140;
         x = parentPos.x + radius * Math.cos(angle);
         y = parentPos.y + radius * Math.sin(angle);
       } else {
-        // Details branch from their parent concept
         const baseAngle = Math.atan2(parentPos.y - 200, parentPos.x - 250);
         const spread = Math.PI / 5;
         const angle = baseAngle + (childIndex - 0.5) * spread;
@@ -219,18 +227,15 @@ export default function RecordPage() {
         y = parentPos.y + radius * Math.sin(angle);
       }
 
-      // Update parent's child count
       parentPos.childCount++;
-
-      // Store this node's position
       nodePositionsRef.current.set(nodeId, { x, y, childCount: 0 });
 
       const color = colors[concept.type] || colors.concept;
 
-      // Create node with explanation in data
       newNodes.push({
         id: nodeId,
         data: {
+          plainLabel: concept.label,
           label: (
             <div className="text-center">
               <div className="font-semibold">{concept.label}</div>
@@ -251,15 +256,16 @@ export default function RecordPage() {
           fontSize: concept.type === 'main' ? '14px' : '12px',
           fontWeight: concept.type === 'main' ? '600' : '500',
           maxWidth: concept.type === 'detail' ? '120px' : '160px',
-          boxShadow: concept.type === 'main'
-            ? '0 0 30px rgba(20, 184, 166, 0.3)'
-            : '0 4px 20px rgba(0, 0, 0, 0.3)',
+          boxShadow:
+            concept.type === 'main'
+              ? '0 0 30px rgba(20, 184, 166, 0.3)'
+              : '0 4px 20px rgba(0, 0, 0, 0.3)',
           cursor: 'grab',
         },
       });
 
-      // Create edge to parent
-      const edgeColor = concept.type === 'main' ? '#14b8a6' : concept.type === 'concept' ? '#f59e0b' : '#4b5563';
+      const edgeColor =
+        concept.type === 'main' ? '#14b8a6' : concept.type === 'concept' ? '#f59e0b' : '#4b5563';
       newEdges.push({
         id: `edge-${nodeId}`,
         source: parentId,
@@ -307,15 +313,29 @@ export default function RecordPage() {
   // Connect to LiveKit room (without publishing tracks)
   const connectToLiveKit = useCallback(async () => {
     console.log('[LiveKit] Starting connection process...');
-    
-    // If already connected, don't reconnect
-    if (roomRef.current && roomRef.current.state === ConnectionState.Connected) {
-      console.log('[LiveKit] Already connected, skipping connection');
-      setAgentReady(true);
-      return;
+
+    const existing = roomRef.current;
+    if (existing) {
+      const st = existing.state;
+      // Do not tear down the client while LiveKit is connecting or reconnecting — that
+      // caused overlapping connects to abort with "Client initiated disconnect".
+      if (st === ConnectionState.Connected) {
+        console.log('[LiveKit] Already connected, skipping connection');
+        setLiveKitConnected(true);
+        setAgentReady(true);
+        return;
+      }
+      if (
+        st === ConnectionState.Connecting ||
+        st === ConnectionState.Reconnecting ||
+        st === ConnectionState.SignalReconnecting
+      ) {
+        setLiveKitConnected(true);
+        return;
+      }
     }
-    
-    // Cleanup any existing connection first
+
+    // Cleanup any existing connection first (only when disconnected or no room)
     if (roomRef.current) {
       console.log('[LiveKit] Cleaning up existing connection...');
       try {
@@ -325,7 +345,7 @@ export default function RecordPage() {
       }
       roomRef.current = null;
     }
-    
+
     try {
       // Fetch token from our API with unique room name
       const roomName = `smartsketch-${sessionIdRef.current}`;
@@ -359,6 +379,9 @@ export default function RecordPage() {
         console.warn('NEXT_PUBLIC_LIVEKIT_URL not set, skipping LiveKit connection');
         return;
       }
+
+      liveKitConnectGenerationRef.current += 1;
+      const connectGen = liveKitConnectGenerationRef.current;
 
       // Create and connect to room with better connection options
       console.log('[LiveKit] Creating room instance...');
@@ -403,6 +426,17 @@ export default function RecordPage() {
       await room.connect(livekitUrl, token, {
         autoSubscribe: true,
       });
+      if (connectGen !== liveKitConnectGenerationRef.current || roomRef.current !== room) {
+        try {
+          await room.disconnect();
+        } catch {
+          /* ignore */
+        }
+        if (roomRef.current === room) {
+          roomRef.current = null;
+        }
+        return;
+      }
       console.log('[LiveKit] ✅ Connected to LiveKit room:', room.name);
       setLiveKitConnected(true);
       console.log('[LiveKit] State updated - liveKitConnected set to true');
@@ -673,7 +707,98 @@ export default function RecordPage() {
     return () => clearTimeout(id);
   }, [liveKitConnected, agentReady]);
 
-  const canStartRecording = agentReady || allowStartWithoutAgent || !isLiveKitConfigured();
+  const canStartRecording =
+    !isLiveKitConfigured() || (liveKitConnected && (agentReady || allowStartWithoutAgent));
+
+  /** Browser STT + /api/process-transcript when LiveKit agent path is unavailable (no LiveKit URL or grace-period fallback). */
+  useEffect(() => {
+    const useBrowserStt = !isLiveKitConfigured() || allowStartWithoutAgent;
+    if (!isRecording || isPaused || !stream || !useBrowserStt) {
+      if (localSttIntervalRef.current) {
+        clearInterval(localSttIntervalRef.current);
+        localSttIntervalRef.current = null;
+      }
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.stop();
+        } catch {
+          /* ignore */
+        }
+        speechRecognitionRef.current = null;
+      }
+      return;
+    }
+
+    const w = window as WindowWithSpeech;
+    const ctor = w.SpeechRecognition || w.webkitSpeechRecognition;
+    if (!ctor) {
+      console.warn('[local STT] SpeechRecognition not available in this browser');
+      return;
+    }
+
+    const rec = new ctor();
+    speechRecognitionRef.current = rec;
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = 'en-US';
+
+    rec.onresult = (event: SpeechRecognitionResultEvent) => {
+      let finalText = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          finalText += event.results[i][0].transcript;
+        }
+      }
+      const t = finalText.trim();
+      if (t) {
+        localSttBufferRef.current = `${localSttBufferRef.current} ${t}`.trim();
+      }
+    };
+
+    rec.onerror = (ev: { error: string }) => {
+      console.warn('[local STT]', ev.error);
+    };
+
+    try {
+      rec.start();
+    } catch (e) {
+      console.warn('[local STT] start failed', e);
+    }
+
+    localSttIntervalRef.current = setInterval(async () => {
+      const text = localSttBufferRef.current.trim();
+      if (text.length < 50) return;
+      try {
+        const response = await authFetch('/api/process-transcript', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ transcript: text }),
+        });
+        if (response.ok) {
+          const data = (await response.json()) as { concepts?: ConceptData[] };
+          if (Array.isArray(data.concepts) && data.concepts.length > 0) {
+            addConceptsToMap(data.concepts);
+          }
+          localSttBufferRef.current = '';
+        }
+      } catch (err) {
+        console.error('[local STT] process-transcript error', err);
+      }
+    }, 10000);
+
+    return () => {
+      if (localSttIntervalRef.current) {
+        clearInterval(localSttIntervalRef.current);
+        localSttIntervalRef.current = null;
+      }
+      try {
+        rec.stop();
+      } catch {
+        /* ignore */
+      }
+      speechRecognitionRef.current = null;
+    };
+  }, [isRecording, isPaused, stream, allowStartWithoutAgent, addConceptsToMap]);
 
   const handleChatSubmit = useCallback(
     async (e: FormEvent) => {
@@ -700,7 +825,7 @@ export default function RecordPage() {
         });
 
         if (!res.ok) {
-          let errDetails = 'Gemini request failed';
+          let errDetails = 'Chat request failed';
           try {
             const errJson = await res.json();
             errDetails = errJson?.details || errJson?.error || errDetails;
@@ -715,10 +840,11 @@ export default function RecordPage() {
         setChatMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
       } catch (error) {
         const message = (error as Error)?.message || 'Unknown error';
-        console.error('Gemini chat error:', message);
-        const friendly = message.includes('Missing GEMINI_API_KEY')
-          ? 'Gemini API key is missing. Add GEMINI_API_KEY to .env.local and restart the dev server.'
-          : `Sorry, I ran into an issue: ${message}`;
+        console.error('Session chat error:', message);
+        const friendly =
+          message.includes('Gemini API key') || message.includes('not configured')
+            ? 'Gemini API key is missing. Add GEMINI_API_KEY to .env.local and restart the dev server.'
+            : `Sorry, I ran into an issue: ${message}`;
         setChatMessages((prev) => [...prev, { role: 'assistant', content: friendly }]);
       } finally {
         setIsChatSending(false);
@@ -728,6 +854,10 @@ export default function RecordPage() {
   );
 
   const handleStartRecording = async () => {
+    if (isLiveKitConfigured() && !liveKitConnected) {
+      console.warn('[Start Recording] Blocked: LiveKit not connected yet');
+      return;
+    }
     if (stream) {
       console.log('[Start Recording] Stream available, beginning recording...');
       console.log('[Start Recording] Video tracks:', stream.getVideoTracks().length);
@@ -765,7 +895,7 @@ export default function RecordPage() {
       // Reset mind map
       setNodes([{
         id: 'center',
-        data: { label: 'Lecture' },
+        data: { label: 'Lecture', plainLabel: 'Lecture' },
         position: { x: 250, y: 200 },
         style: {
           background: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
@@ -786,6 +916,7 @@ export default function RecordPage() {
       nodeCounterRef.current = 0;
       nodePositionsRef.current = new Map([['center', { x: 250, y: 200, childCount: 0 }]]);
       setTranscripts([]);
+      localSttBufferRef.current = '';
 
       // Publish tracks to LiveKit (will reconnect if needed)
       console.log('[Start Recording] Publishing tracks to LiveKit...');
@@ -939,7 +1070,7 @@ export default function RecordPage() {
               <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary/10 border border-primary/20">
                 <div className="w-2 h-2 bg-primary rounded-full animate-pulse" />
                 <span className="text-primary text-sm font-medium">
-                  {agentReady ? 'Agent Connected' : 'Connecting...'}
+                  {agentReady ? 'Agent Connected' : 'Python agent pending…'}
                 </span>
               </div>
             ) : (
@@ -976,7 +1107,7 @@ export default function RecordPage() {
                       setTranscripts([]);
                       setNodes([{
                         id: 'center',
-                        data: { label: 'Lecture' },
+                        data: { label: 'Lecture', plainLabel: 'Lecture' },
                         position: { x: 250, y: 200 },
                         style: {
                           background: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
@@ -1052,10 +1183,23 @@ export default function RecordPage() {
                               : 'bg-background-secondary text-foreground border border-surface-border'
                           }`}
                         >
-                          {msg.content}
+                          {msg.role === 'assistant' ? (
+                            <div className="prose prose-sm prose-invert max-w-none [&_p]:mb-2 [&_ul]:mb-2 [&_ol]:mb-2 [&_li]:mb-1 [&_code]:bg-black/40 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-foreground [&_pre]:bg-black/40 [&_pre]:text-foreground [&_pre]:p-2 [&_pre]:rounded [&_strong]:text-primary [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-xs">
+                              <ReactMarkdown>{msg.content}</ReactMarkdown>
+                            </div>
+                          ) : (
+                            msg.content
+                          )}
                         </div>
                       </div>
                     ))}
+                    {isChatSending && (
+                      <div className="flex justify-start">
+                        <div className="max-w-[75%] rounded-xl px-4 py-2.5 text-sm bg-background-secondary text-foreground border border-surface-border opacity-80 animate-pulse">
+                          Assistant is thinking...
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <form className="border-t border-surface-border p-4 flex gap-3" onSubmit={handleChatSubmit}>
                     <input
@@ -1137,7 +1281,9 @@ export default function RecordPage() {
                       ) : (
                         <>
                           <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                          Connecting to AI...
+                          {isLiveKitConfigured() && !liveKitConnected
+                            ? 'Connecting to LiveKit…'
+                            : 'Waiting for Python agent…'}
                         </>
                       )}
                     </button>
@@ -1181,13 +1327,13 @@ export default function RecordPage() {
                 <p className="text-center text-sm text-foreground-muted">
                   {!isLiveKitConfigured()
                     ? 'Local mode: recording works without LiveKit. Mind map updates require the Python agent if you add LiveKit later.'
-                    : canStartRecording
-                      ? agentReady
-                        ? 'AI agent ready. Click Start Recording to begin.'
-                        : 'Starting without agent: you can record locally; the mind map may not update until the agent is running.'
-                      : liveKitConnected
-                        ? 'Waiting for the Python agent… If it does not connect, Start will unlock automatically.'
-                        : 'Connecting to LiveKit...'}
+                    : !liveKitConnected
+                      ? 'Connecting to LiveKit… Start Recording stays disabled until the room is connected.'
+                      : canStartRecording
+                        ? agentReady
+                          ? 'LiveKit connected. AI agent ready — click Start Recording to begin.'
+                          : 'LiveKit connected. Starting without agent: you can record; the mind map may not update until the Python agent is running.'
+                        : 'LiveKit connected. Waiting for the Python agent… Start unlocks automatically after 25s if the agent never joins.'}
                 </p>
               </div>
             ) : (
@@ -1264,8 +1410,8 @@ export default function RecordPage() {
                             : allowStartWithoutAgent
                               ? 'Recording without agent — mind map may stay static until the agent runs'
                               : liveKitConnected
-                                ? 'Waiting for agent...'
-                                : 'Connect LiveKit to see real-time concepts'}
+                                ? 'LiveKit connected — waiting for Python agent…'
+                                : 'Connecting to LiveKit…'}
                         </p>
                       </div>
                       {agentReady && (
@@ -1295,76 +1441,6 @@ export default function RecordPage() {
               </div>
             )}
           </div>
-
-          {/* Post-Recording Chat Section */}
-          {recordingEnded && (
-            <div className="w-full h-full card overflow-hidden flex flex-col opacity-0 animate-fade-in-up [animation-delay:0.2s] [animation-fill-mode:forwards]">
-              <div className="px-6 py-4 border-b border-surface-border bg-background-secondary">
-                <h2 className="text-lg font-display font-bold text-foreground">Sketch Discussion</h2>
-                <p className="text-xs text-foreground-muted mt-1">Ask questions about your recording</p>
-              </div>
-
-              {/* Messages */}
-              <div
-                ref={chatMessagesRef}
-                className="flex-1 overflow-y-auto custom-scrollbar px-4 py-3 space-y-3"
-              >
-                {chatMessages.length === 0 && (
-                  <div className="text-xs text-foreground-muted text-center py-8">No messages yet. Start the conversation.</div>
-                )}
-                {chatMessages.map((msg, idx) => (
-                  <div
-                    key={idx}
-                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div
-                      className={`max-w-[75%] rounded-xl px-4 py-2.5 text-sm opacity-0 animate-fade-in-up [animation-fill-mode:forwards] ${
-                        msg.role === 'user'
-                          ? 'bg-gradient-to-r from-primary to-primary-dark text-background'
-                          : 'bg-background-secondary text-foreground border border-surface-border'
-                      }`}
-                      style={{ animationDelay: `${idx * 50}ms` }}
-                    >
-                      {msg.role === 'assistant' ? (
-                        <div className="prose prose-sm prose-invert max-w-none [&_p]:mb-2 [&_ul]:mb-2 [&_ol]:mb-2 [&_li]:mb-1 [&_code]:bg-black/40 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-foreground [&_pre]:bg-black/40 [&_pre]:text-foreground [&_pre]:p-2 [&_pre]:rounded [&_strong]:text-primary [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-xs">
-                          <ReactMarkdown>{msg.content}</ReactMarkdown>
-                        </div>
-                      ) : (
-                        msg.content
-                      )}
-                    </div>
-                  </div>
-                ))}
-                {isChatSending && (
-                  <div className="flex justify-start">
-                    <div className="max-w-[75%] rounded-xl px-4 py-2.5 text-sm bg-background-secondary text-foreground border border-surface-border opacity-80 animate-pulse">
-                      Gemini is thinking...
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Input Form */}
-              <div className="border-t border-surface-border p-4 bg-background-secondary">
-                <form className="flex gap-3" onSubmit={handleChatSubmit}>
-                  <input
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    className="flex-1 px-4 py-2.5 rounded-xl input-field text-sm"
-                    placeholder="Ask about this recording..."
-                    disabled={isChatSending}
-                  />
-                  <button
-                    type="submit"
-                    className="px-5 py-2.5 rounded-xl btn-primary text-sm font-medium disabled:opacity-70 disabled:cursor-not-allowed"
-                    disabled={isChatSending}
-                  >
-                    Send
-                  </button>
-                </form>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Confirmation Modal */}

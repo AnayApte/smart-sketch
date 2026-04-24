@@ -1,6 +1,12 @@
-import { AccessToken } from 'livekit-server-sdk';
+import {
+  AccessToken,
+  AgentDispatchClient,
+  RoomAgentDispatch,
+  RoomConfiguration,
+} from 'livekit-server-sdk';
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthenticatedUser } from '@/lib/api-auth';
+import { SMARTSKETCH_AGENT_NAME } from '@/lib/livekit-agent';
 import { rateLimitExceeded } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
@@ -62,7 +68,29 @@ export async function GET(request: NextRequest) {
       canPublishData: true,
     });
 
+    // Dispatch our Python worker when this JWT creates the room (first participant).
+    // See https://docs.livekit.io/agents/server/agent-dispatch/
+    at.roomConfig = new RoomConfiguration({
+      agents: [
+        new RoomAgentDispatch({
+          agentName: SMARTSKETCH_AGENT_NAME,
+        }),
+      ],
+    });
+
     const token = await at.toJwt();
+
+    // Explicit dispatch works even when the room already exists (JWT roomConfig
+    // only runs on first room creation — see LiveKit agent dispatch docs).
+    const livekitHost = (process.env.LIVEKIT_URL ?? process.env.NEXT_PUBLIC_LIVEKIT_URL ?? '').trim();
+    if (livekitHost) {
+      try {
+        const dispatchClient = new AgentDispatchClient(livekitHost, apiKey, apiSecret);
+        await dispatchClient.createDispatch(roomName, SMARTSKETCH_AGENT_NAME);
+      } catch (err) {
+        console.error('[livekit/token] createDispatch failed (roomConfig may still dispatch on new room):', err);
+      }
+    }
 
     return NextResponse.json({ token, room: roomName });
   } catch (error) {
