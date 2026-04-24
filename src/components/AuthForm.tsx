@@ -23,6 +23,7 @@ export default function AuthForm({ scrollRootRef }: AuthFormProps) {
   const [registerFirstName, setRegisterFirstName] = useState('');
   const [registerLastName, setRegisterLastName] = useState('');
   const [error, setError] = useState('');
+  const [registerSuccessMessage, setRegisterSuccessMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [loadingOverride, setLoadingOverride] = useState(false);
 
@@ -77,6 +78,7 @@ export default function AuthForm({ scrollRootRef }: AuthFormProps) {
 
   const handleToggle = () => {
     setError('');
+    setRegisterSuccessMessage('');
     const fieldCount = isLogin ? 5 : 7;
     const staggerTime = fieldCount * 100;
     const animationDuration = 1000;
@@ -155,6 +157,7 @@ export default function AuthForm({ scrollRootRef }: AuthFormProps) {
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setRegisterSuccessMessage('');
 
     if (!registerFirstName || !registerLastName || !registerEmail || !registerPassword || !registerConfirm) {
       setError('Please fill in all fields');
@@ -177,7 +180,7 @@ export default function AuthForm({ scrollRootRef }: AuthFormProps) {
     }
 
     setIsSubmitting(true);
-    const { error: signUpError } = await signUp(registerEmail, registerPassword, {
+    const { error: signUpError, signedIn } = await signUp(registerEmail, registerPassword, {
       firstName: registerFirstName,
       lastName: registerLastName
     });
@@ -185,10 +188,19 @@ export default function AuthForm({ scrollRootRef }: AuthFormProps) {
     if (signUpError) {
       setError(signUpError.message || 'Failed to register. Please try again.');
       setIsSubmitting(false);
-    } else {
-      setError('Registration successful! Please check your email to confirm your account, then login.');
-      setIsSubmitting(false);
+      return;
     }
+
+    if (signedIn) {
+      setIsSubmitting(false);
+      router.push('/home');
+      return;
+    }
+
+    setRegisterSuccessMessage(
+      `Check your email — we sent a confirmation link to ${registerEmail}. Open that link to verify your account, then sign in here with the same email and password.`
+    );
+    setIsSubmitting(false);
   };
 
   if (loading && !loadingOverride && !scrollRootRef) {
@@ -310,13 +322,15 @@ export default function AuthForm({ scrollRootRef }: AuthFormProps) {
           {/* Register Form */}
           {!isLogin && (
             <form onSubmit={handleRegister} className="flex flex-col space-y-4">
-              {error && (
-                <div className={`p-3 border rounded-xl text-sm ${
-                  error.includes('successful')
-                    ? 'bg-green-500/10 border-green-500/20 text-green-400'
-                    : 'bg-red-500/10 border-red-500/20 text-red-400'
-                }`}>
-                  {error}
+              {(error || registerSuccessMessage) && (
+                <div
+                  className={`p-3 border rounded-xl text-sm ${
+                    registerSuccessMessage
+                      ? 'bg-green-500/10 border-green-500/20 text-green-400'
+                      : 'bg-red-500/10 border-red-500/20 text-red-400'
+                  }`}
+                >
+                  {registerSuccessMessage || error}
                 </div>
               )}
               <div className="grid grid-cols-2 gap-3">

@@ -7,7 +7,11 @@ import { supabase } from '@/lib/supabase';
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  signUp: (email: string, password: string, metadata?: { firstName: string; lastName: string }) => Promise<{ error: any | null }>;
+  signUp: (
+    email: string,
+    password: string,
+    metadata?: { firstName: string; lastName: string }
+  ) => Promise<{ error: any | null; signedIn?: boolean }>;
   signIn: (email: string, password: string) => Promise<{ error: any | null }>;
   signOut: () => Promise<void>;
 }
@@ -49,19 +53,57 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signUp = async (email: string, password: string, metadata?: { firstName: string; lastName: string }) => {
     try {
-      const { error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
-            first_name: metadata?.firstName,
-            last_name: metadata?.lastName,
-          },
-        },
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password,
+          firstName: metadata?.firstName ?? '',
+          lastName: metadata?.lastName ?? '',
+        }),
       });
-      return { error };
+
+      type SignupApiPayload = {
+        ok?: boolean;
+        message?: string;
+        name?: string;
+        session?: { access_token: string; refresh_token: string };
+      };
+      let payload: SignupApiPayload | null = null;
+      try {
+        payload = (await res.json()) as SignupApiPayload;
+      } catch {
+        payload = null;
+      }
+
+      const proxyError =
+        !res.ok || !payload || payload.ok === false
+          ? {
+              message: payload?.message ?? `Sign up request failed (${res.status}).`,
+              name: payload?.name ?? 'AuthError',
+              status: res.status,
+            }
+          : null;
+
+      if (proxyError) {
+        return { error: proxyError };
+      }
+
+      if (payload?.session) {
+        const { error: sessionError } = await supabase.auth.setSession({
+          access_token: payload.session.access_token,
+          refresh_token: payload.session.refresh_token,
+        });
+        if (sessionError) {
+          return { error: sessionError, signedIn: false };
+        }
+        return { error: null, signedIn: true };
+      }
+
+      return { error: null, signedIn: false };
     } catch (error) {
-      return { error };
+      return { error, signedIn: false };
     }
   };
 
