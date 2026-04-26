@@ -121,6 +121,12 @@ const DEBUG_DEMO_TRANSCRIPT = [
   'Environmental constraints such as heat stress and low CO2 can increase photorespiration, which lowers photosynthetic efficiency.',
   'C4 and CAM pathways are adaptive strategies that reduce photorespiration in specific climates by changing when or where CO2 is concentrated.',
   'As a final synthesis, remember the core flow: light energy drives ATP and NADPH production, and those molecules power carbon fixation into sugars that fuel growth and metabolism.',
+  'From an ecosystem perspective, primary producers that photosynthesize form the base of most food webs. Net primary productivity links solar capture to biomass available to herbivores and decomposers.',
+  'When we measure photosynthesis in the field, we often compare gross versus net rates. Respiration in the dark uses some of the carbon fixed in daylight, so net carbon gain reflects the balance of both processes.',
+  'Stomatal conductance is a major control point: plants must open pores to take in CO2 but risk water loss. Guard cells integrate light, humidity, and hormone signals to tune aperture through the day.',
+  'Chlorophyll fluorescence is sometimes used as a non-invasive probe of photosystem health. High yield under steady light can indicate efficient light use, while stress often shifts that signature.',
+  'In agriculture, breeders care about canopy light interception and leaf nitrogen allocation to Rubisco. Small improvements in quantum yield or stress tolerance can translate to meaningful yield gains.',
+  'Looking ahead, understanding photosynthesis also informs bio-inspired solar strategies and debates about enhancing crop efficiency, though engineering trade-offs between growth, defense, and stress remain complex.',
 ].join(' ');
 
 export default function RecordPage() {
@@ -164,6 +170,7 @@ export default function RecordPage() {
   const [homeModalMode, setHomeModalMode] = useState<'active' | 'ended'>('active');
   const [recordingTitle, setRecordingTitle] = useState('');
   const [recordingTitleError, setRecordingTitleError] = useState('');
+  const [demoTranscriptLoading, setDemoTranscriptLoading] = useState(false);
 
   // Audio recording state
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -221,6 +228,28 @@ export default function RecordPage() {
 
   // Merge concepts across batches, then apply shared tree layout (no overlapping radial fan).
   const addConceptsToMap = useCallback((concepts: ConceptData[]) => {
+    // #region agent log H3
+    fetch('http://127.0.0.1:7632/ingest/36dc6992-f772-466f-a02b-fd70ac711c4b', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Debug-Session-Id': '119102',
+      },
+      body: JSON.stringify({
+        sessionId: '119102',
+        runId: 'demo-debug',
+        hypothesisId: 'H3',
+        location: 'record/page.tsx:addConceptsToMap:entry',
+        message: 'client received concepts for map',
+        data: {
+          incomingCount: concepts.length,
+          incomingLabelsSample: concepts.slice(0, 10).map((c) => c.label),
+          existingNodeCount: nodesRef.current.length,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     // #region agent log H3
     debugLog('H3', 'record/page.tsx:addConceptsToMap:entry', 'addConceptsToMap called', {
       conceptsCount: concepts.length,
@@ -281,13 +310,36 @@ export default function RecordPage() {
       {
         mode: 'external-root',
         rootId: 'center',
-        lectureAnchor: { x: 250, y: 200, height: 100, gapAfter: 28 },
+        lectureAnchor: { x: 250, y: 200, height: 100, gapAfter: 40 },
       },
       'record'
     );
 
     setNodes([createRecordCenterFlowNode(), ...layoutNodes]);
     setEdges(layoutEdges);
+    // #region agent log H3
+    fetch('http://127.0.0.1:7632/ingest/36dc6992-f772-466f-a02b-fd70ac711c4b', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Debug-Session-Id': '119102',
+      },
+      body: JSON.stringify({
+        sessionId: '119102',
+        runId: 'demo-debug',
+        hypothesisId: 'H3',
+        location: 'record/page.tsx:addConceptsToMap:exit',
+        message: 'map update computed',
+        data: {
+          addedCount: added,
+          totalAccumulatedConcepts: newAcc.length,
+          layoutNodeCount: layoutNodes.length,
+          layoutEdgeCount: layoutEdges.length,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
 
     // #region agent log H3
     debugLog('H3', 'record/page.tsx:addConceptsToMap:exit', 'addConceptsToMap completed', {
@@ -297,6 +349,57 @@ export default function RecordPage() {
     });
     // #endregion
   }, []);
+
+  const injectDebugTranscript = useCallback(async (text: string, opts?: { fastMode?: boolean }) => {
+    const transcript = (text || '').trim();
+    debugLog('H5', 'record/page.tsx:injectDebugTranscript:start', 'debug transcript injection started', {
+      transcriptChars: transcript.length,
+      fastMode: !!opts?.fastMode,
+    });
+    if (!transcript) return;
+
+    const response = await authFetch('/api/process-transcript', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript, fastMode: !!opts?.fastMode }),
+    });
+    const data = (await response.json().catch(() => ({}))) as { concepts?: ConceptData[]; error?: string };
+
+    debugLog('H5', 'record/page.tsx:injectDebugTranscript:response', 'debug transcript injection response', {
+      ok: response.ok,
+      conceptsCount: Array.isArray(data.concepts) ? data.concepts.length : 0,
+      error: typeof data.error === 'string' ? data.error : null,
+    });
+
+    if (response.ok && Array.isArray(data.concepts) && data.concepts.length > 0) {
+      addConceptsToMap(data.concepts);
+      setShowFlowBoard(true);
+    }
+    setTranscripts((prev) => [...prev, transcript]);
+  }, [addConceptsToMap]);
+
+  const handleLoadDemoTranscript = useCallback(async () => {
+    if (demoTranscriptLoading) return;
+    setDemoTranscriptLoading(true);
+    try {
+      const w = window as Window & {
+        __smartsketchDebugInjectTranscript?: (
+          text: string,
+          opts?: { fastMode?: boolean }
+        ) => Promise<void>;
+        __smartsketchDebugDemoTranscript?: string;
+      };
+      const injectedTranscript = w.__smartsketchDebugDemoTranscript ?? DEBUG_DEMO_TRANSCRIPT;
+
+      if (typeof w.__smartsketchDebugInjectTranscript === 'function') {
+        await w.__smartsketchDebugInjectTranscript(injectedTranscript, { fastMode: true });
+      } else {
+        await injectDebugTranscript(injectedTranscript, { fastMode: true });
+      }
+    } finally {
+      setDemoTranscriptLoading(false);
+    }
+  }, [demoTranscriptLoading, injectDebugTranscript]);
 
   // Handle messages from the agent
   const handleAgentMessage = useCallback((message: AgentMessage) => {
@@ -1118,43 +1221,19 @@ export default function RecordPage() {
 
   useEffect(() => {
     const w = window as Window & {
-      __smartsketchDebugInjectTranscript?: (text: string) => Promise<void>;
+      __smartsketchDebugInjectTranscript?: (
+        text: string,
+        opts?: { fastMode?: boolean }
+      ) => Promise<void>;
       __smartsketchDebugInjectDemoTranscript?: () => Promise<void>;
       __smartsketchDebugDemoTranscript?: string;
     };
 
-    w.__smartsketchDebugInjectTranscript = async (text: string) => {
-      const transcript = (text || '').trim();
-      // #region agent log H5
-      debugLog('H5', 'record/page.tsx:debugInject:start', 'debug transcript injection started', {
-        transcriptChars: transcript.length,
-      });
-      // #endregion
-      if (!transcript) return;
-
-      const response = await authFetch('/api/process-transcript', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript }),
-      });
-      const data = (await response.json().catch(() => ({}))) as { concepts?: ConceptData[]; error?: string };
-
-      // #region agent log H5
-      debugLog('H5', 'record/page.tsx:debugInject:response', 'debug transcript injection response', {
-        ok: response.ok,
-        conceptsCount: Array.isArray(data.concepts) ? data.concepts.length : 0,
-        error: typeof data.error === 'string' ? data.error : null,
-      });
-      // #endregion
-
-      if (response.ok && Array.isArray(data.concepts) && data.concepts.length > 0) {
-        addConceptsToMap(data.concepts);
-      }
-      setTranscripts((prev) => [...prev, transcript]);
-    };
+    w.__smartsketchDebugInjectTranscript = (text: string, opts?: { fastMode?: boolean }) =>
+      injectDebugTranscript(text, opts);
     w.__smartsketchDebugDemoTranscript = DEBUG_DEMO_TRANSCRIPT;
     w.__smartsketchDebugInjectDemoTranscript = async () => {
-      await w.__smartsketchDebugInjectTranscript?.(DEBUG_DEMO_TRANSCRIPT);
+      await injectDebugTranscript(DEBUG_DEMO_TRANSCRIPT);
     };
 
     return () => {
@@ -1162,7 +1241,7 @@ export default function RecordPage() {
       delete w.__smartsketchDebugInjectDemoTranscript;
       delete w.__smartsketchDebugDemoTranscript;
     };
-  }, [addConceptsToMap]);
+  }, [injectDebugTranscript]);
 
   const handleChatSubmit = useCallback(
     async (e: FormEvent) => {
@@ -1627,7 +1706,7 @@ export default function RecordPage() {
                 </div>
 
                 {/* Controls */}
-                <div className="flex justify-center gap-4">
+                <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4">
                   {!isRecording ? (
                     <button
                       onClick={handleStartRecording}
@@ -1678,6 +1757,14 @@ export default function RecordPage() {
                           Resume
                         </button>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => void handleLoadDemoTranscript()}
+                        disabled={demoTranscriptLoading}
+                        className="px-6 py-3 rounded-xl glass border border-surface-border text-foreground-muted hover:text-foreground hover:border-primary/30 transition-colors font-semibold text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        {demoTranscriptLoading ? 'Loading demo…' : 'Load demo transcript'}
+                      </button>
                       <button
                         onClick={handleStopRecording}
                         className="px-6 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-colors font-semibold flex items-center gap-2"

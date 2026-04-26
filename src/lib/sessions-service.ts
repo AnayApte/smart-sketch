@@ -13,6 +13,101 @@ export interface SavedSession {
   updated_at: string;
 }
 
+function isRenderableReactNode(label: unknown): boolean {
+  if (label == null || typeof label !== 'object') return false;
+  return (
+    typeof (label as { $$typeof?: symbol }).$$typeof === 'symbol' &&
+    typeof (label as { type?: unknown }).type !== 'undefined'
+  );
+}
+
+/** Serialized React elements become plain `{ type, props, key, ... }` — not valid as React children. */
+function isSerializedReactElementLike(label: unknown): boolean {
+  if (label == null || typeof label !== 'object' || Array.isArray(label)) return false;
+  const o = label as Record<string, unknown>;
+  return 'type' in o && 'props' in o && !isRenderableReactNode(label);
+}
+
+function plainTextFromNodeData(data: Record<string, unknown> | undefined): string {
+  if (!data) return 'Node';
+  const pl = data.plainLabel;
+  if (typeof pl === 'string' && pl.trim()) return pl.trim();
+  const lb = data.label;
+  if (typeof lb === 'string' && lb.trim()) return lb.trim();
+  if (isSerializedReactElementLike(lb)) {
+    const props = (lb as { props?: { children?: unknown } }).props;
+    const ch = props?.children;
+    const first = Array.isArray(ch) ? ch[0] : ch;
+    if (first && typeof first === 'object' && first !== null && 'props' in (first as object)) {
+      const inner = (first as { props?: { children?: unknown } }).props?.children;
+      if (typeof inner === 'string' && inner.trim()) return inner.trim();
+    }
+  }
+  return 'Node';
+}
+
+/** Strip JSX from `data.label` so JSON/Supabase round-trips safely; React Flow accepts string labels. */
+export function sanitizeMindMapNodesForStorage(nodes: Node[]): Node[] {
+  return nodes.map((node) => {
+    const data = (node.data || {}) as Record<string, unknown>;
+    const plain = plainTextFromNodeData(data);
+    return {
+      ...node,
+      data: {
+        ...data,
+        plainLabel: plain,
+        label: plain,
+      },
+    };
+  });
+}
+
+/** Fix nodes loaded from DB where `label` was JSX and became a plain object after JSON.parse. */
+export function normalizeMindMapNodesFromDb(nodes: unknown): Node[] {
+  if (!Array.isArray(nodes)) return [];
+  return nodes.map((raw) => {
+    const node = raw as Node;
+    const data = (node.data || {}) as Record<string, unknown>;
+    const plain = plainTextFromNodeData(data);
+    const label = data.label;
+    if (typeof label === 'string' && !isSerializedReactElementLike(label) && !isRenderableReactNode(label)) {
+      return {
+        ...node,
+        data: {
+          ...data,
+          plainLabel:
+            typeof data.plainLabel === 'string' && data.plainLabel.trim() ? data.plainLabel : label.trim(),
+        },
+      };
+    }
+    if (isRenderableReactNode(label)) {
+      return {
+        ...node,
+        data: {
+          ...data,
+          plainLabel: plain,
+          label: plain,
+        },
+      };
+    }
+    return {
+      ...node,
+      data: {
+        ...data,
+        plainLabel: plain,
+        label: plain,
+      },
+    };
+  });
+}
+
+function normalizeSessionRow(row: SavedSession): SavedSession {
+  return {
+    ...row,
+    mind_map_nodes: normalizeMindMapNodesFromDb(row.mind_map_nodes),
+  };
+}
+
 /**
  * Upload audio file to Supabase Storage
  * Returns the public URL of the uploaded file
@@ -89,7 +184,7 @@ export async function saveSession(
         user_id: userId,
         title,
         transcript,
-        mind_map_nodes: nodes,
+        mind_map_nodes: sanitizeMindMapNodesForStorage(nodes),
         mind_map_edges: edges,
         audio_file_url: audioFileUrl,
         created_at: new Date().toISOString(),
@@ -129,7 +224,7 @@ export async function getUserSessions(userId: string): Promise<SavedSession[]> {
       return [];
     }
 
-    return data || [];
+    return (data || []).map((row) => normalizeSessionRow(row as SavedSession));
   } catch (error) {
     console.error('Unexpected error fetching sessions:', error);
     return [];
@@ -152,7 +247,7 @@ export async function getSession(sessionId: string): Promise<SavedSession | null
       return null;
     }
 
-    return data;
+    return normalizeSessionRow(data as SavedSession);
   } catch (error) {
     console.error('Unexpected error fetching session:', error);
     return null;

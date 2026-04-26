@@ -3,13 +3,17 @@ import { GoogleGenerativeAI, GoogleGenerativeAIFetchError } from '@google/genera
 /** Must match `DEFAULT_GEMINI_MODEL` in `gemini-config.ts` (primary when `GEMINI_MODEL` is unset). */
 const DEFAULT_GEMINI_PRIMARY = 'gemini-2.0-flash';
 
-/** Used when `GEMINI_MODEL_CHAIN` / `GEMINI_MODEL_FALLBACKS` are unset: try stronger Flash first, then higher-RPM / older models. */
+/**
+ * Used when `GEMINI_MODEL_CHAIN` / `GEMINI_MODEL_FALLBACKS` are unset.
+ * IDs must exist on generativelanguage.googleapis.com v1beta for `generateContent`
+ * (see https://ai.google.dev/gemini-api/docs/models — avoid unlisted preview IDs).
+ */
 const FREE_TIER_DEFAULT_TAIL = [
+  'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
-  'gemini-3-flash',
-  'gemini-3.1-flash-lite',
+  'gemini-flash-latest',
+  'gemini-flash-lite-latest',
   'gemini-2.0-flash',
-  'gemini-1.5-flash',
 ];
 
 function parseCommaModels(raw: string | undefined): string[] {
@@ -74,23 +78,84 @@ export function isGeminiRateLimitOrQuotaError(err: unknown): boolean {
   );
 }
 
+export function isGeminiModelUnavailableError(err: unknown): boolean {
+  if (err instanceof GoogleGenerativeAIFetchError && err.status === 404) {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('not found') ||
+    lower.includes('is not found for api version') ||
+    lower.includes('not supported for generatecontent') ||
+    lower.includes('model not found')
+  );
+}
+
 export async function withGeminiModelFallback<T>(
   apiKey: string,
   run: (modelName: string, genAI: GoogleGenerativeAI) => Promise<T>
 ): Promise<T> {
+  const runId = `chat-fallback_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const postDebugLog = (
+    hypothesisId: string,
+    location: string,
+    message: string,
+    data: Record<string, unknown>
+  ) => {
+    // #region agent log H-chat-fallback
+    fetch('http://127.0.0.1:7632/ingest/36dc6992-f772-466f-a02b-fd70ac711c4b', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Debug-Session-Id': '119102',
+      },
+      body: JSON.stringify({
+        sessionId: '119102',
+        runId,
+        hypothesisId,
+        location,
+        message,
+        data,
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  };
   const genAI = new GoogleGenerativeAI(apiKey);
   const models = geminiModelChain();
+  postDebugLog('H1', 'gemini-fallback:chain', 'gemini model chain resolved', {
+    models,
+  });
   if (models.length === 0) {
     throw new Error('No Gemini models configured');
   }
   let lastError: unknown;
   for (let i = 0; i < models.length; i++) {
     const name = models[i];
+    postDebugLog('H1', 'gemini-fallback:attempt', 'attempting model', {
+      index: i,
+      name,
+      total: models.length,
+    });
     try {
-      return await run(name, genAI);
+      const result = await run(name, genAI);
+      postDebugLog('H4', 'gemini-fallback:success', 'model succeeded', {
+        index: i,
+        name,
+      });
+      return result;
     } catch (e) {
       lastError = e;
-      const canTryNext = i < models.length - 1 && isGeminiRateLimitOrQuotaError(e);
+      const canTryNext =
+        i < models.length - 1 &&
+        (isGeminiRateLimitOrQuotaError(e) || isGeminiModelUnavailableError(e));
+      postDebugLog('H2', 'gemini-fallback:error', 'model attempt failed', {
+        index: i,
+        name,
+        canTryNext,
+        errorMessage: e instanceof Error ? e.message : String(e),
+      });
       if (canTryNext) {
         console.warn(`[Gemini] Model "${name}" unavailable (quota/rate/overload); trying "${models[i + 1]}"…`);
         continue;

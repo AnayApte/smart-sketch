@@ -13,6 +13,27 @@ const MAX_TITLE_CHARS = 500;
 
 export async function POST(req: NextRequest) {
   try {
+    const runId = `gemini-chat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const postDebugLog = (hypothesisId: string, location: string, message: string, data: Record<string, unknown>) => {
+      // #region agent log H-chat-route
+      fetch('http://127.0.0.1:7632/ingest/36dc6992-f772-466f-a02b-fd70ac711c4b', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Debug-Session-Id': '119102',
+        },
+        body: JSON.stringify({
+          sessionId: '119102',
+          runId,
+          hypothesisId,
+          location,
+          message,
+          data,
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+    };
     const user = await getAuthenticatedUser(req);
     if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -68,6 +89,11 @@ export async function POST(req: NextRequest) {
     const safeTitle =
       typeof title === 'string' ? title.slice(0, MAX_TITLE_CHARS) : 'Untitled session';
     const safeTranscript = typeof transcript === 'string' ? transcript : '';
+    postDebugLog('H3', 'gemini-chat:input', 'chat request sanitized', {
+      messagesCount: chatContents.length,
+      transcriptChars: safeTranscript.length,
+      titleChars: safeTitle.length,
+    });
 
     const systemContent = `You are Sketch Discussion, a concise, helpful assistant summarizing and clarifying lecture concepts captured in transcripts and mind maps.
 
@@ -78,6 +104,9 @@ ${safeTranscript.slice(0, 4000)}
 Respond clearly and concisely, with actionable explanations if asked.`;
 
     const result = await withGeminiModelFallback(apiKey, async (modelName, genAI) => {
+      postDebugLog('H1', 'gemini-chat:model-create', 'creating model instance', {
+        modelName,
+      });
       const model = genAI.getGenerativeModel({
         model: modelName,
         systemInstruction: systemContent,
@@ -85,6 +114,10 @@ Respond clearly and concisely, with actionable explanations if asked.`;
           temperature: 0.7,
           maxOutputTokens: 1024,
         },
+      });
+      postDebugLog('H3', 'gemini-chat:model-generate', 'calling generateContent', {
+        modelName,
+        contentTurns: chatContents.length,
       });
       return model.generateContent({ contents: chatContents });
     });
@@ -95,6 +128,26 @@ Respond clearly and concisely, with actionable explanations if asked.`;
     return NextResponse.json({ reply });
   } catch (error) {
     const message = (error as Error)?.message || 'Unknown error';
+    // #region agent log H-chat-route
+    fetch('http://127.0.0.1:7632/ingest/36dc6992-f772-466f-a02b-fd70ac711c4b', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Debug-Session-Id': '119102',
+      },
+      body: JSON.stringify({
+        sessionId: '119102',
+        runId: 'gemini-chat-catch',
+        hypothesisId: 'H2',
+        location: 'gemini-chat:catch',
+        message: 'gemini chat route failed',
+        data: {
+          errorMessage: message,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     console.error('Sketch chat (Gemini) error:', message);
     const exposeDetails = process.env.NODE_ENV === 'development';
     return NextResponse.json(

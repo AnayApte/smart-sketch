@@ -65,11 +65,11 @@ BATCH_INTERVAL_SECONDS = 5
 _DEFAULT_GEMINI_PRIMARY = "gemini-2.0-flash"
 # When GEMINI_MODEL_CHAIN / GEMINI_MODEL_FALLBACKS are unset, try these after the primary (same order as Next.js `gemini-fallback.ts`).
 _FREE_TIER_MODEL_TAIL = [
+    "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
-    "gemini-3-flash",
-    "gemini-3.1-flash-lite",
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
 ]
 
 def _dedupe_models(models: List[str]) -> List[str]:
@@ -126,6 +126,23 @@ def _is_gemini_quota_or_rate_limit(exc: BaseException) -> bool:
                 google_exc.ServiceUnavailable,
             ),
         )
+    except ImportError:
+        return False
+
+
+def _is_gemini_model_unavailable(exc: BaseException) -> bool:
+    """404 / unknown model / not supported for generateContent — try next model in chain."""
+    msg = str(exc).lower()
+    if "404" in msg:
+        return True
+    if "not found" in msg and ("model" in msg or "models/" in msg):
+        return True
+    if "not supported for generatecontent" in msg:
+        return True
+    try:
+        from google.api_core import exceptions as google_exc
+
+        return isinstance(exc, google_exc.NotFound)
     except ImportError:
         return False
 
@@ -383,10 +400,14 @@ Transcript to analyze:
                 return []
             except Exception as e:
                 last_error = e
-                can_try_next = idx < len(models_to_try) - 1 and _is_gemini_quota_or_rate_limit(e)
+                can_try_next = idx < len(models_to_try) - 1 and (
+                    _is_gemini_quota_or_rate_limit(e) or _is_gemini_model_unavailable(e)
+                )
                 if can_try_next:
                     nxt = models_to_try[idx + 1]
-                    print(f"[Gemini] Model {model_name!r} quota/rate limit; trying {nxt!r}… ({e})")
+                    print(
+                        f"[Gemini] Model {model_name!r} unavailable; trying {nxt!r}… ({e})"
+                    )
                     continue
                 print(f"[ERROR] Gemini API error: {e}")
                 return []
