@@ -1,83 +1,56 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthenticatedUser } from '@/lib/api-auth';
 import { rateLimitExceeded } from '@/lib/rate-limit';
-import type { ConceptPayload, ConceptType } from '@/lib/concept-types';
+import type { ConceptPayload } from '@/lib/concept-types';
 import { geminiApiKey } from '@/lib/gemini-config';
 import { withGeminiModelFallback } from '@/lib/gemini-fallback';
+import {
+  fallbackConceptsFromTranscript,
+  hierarchySystemInstruction,
+  hierarchyUserPrompt,
+  mergeSegmentConcepts,
+  parseConceptsJson,
+  repairConceptHierarchy,
+  splitTranscriptIntoSegments,
+  validateConceptHierarchy,
+} from '@/lib/transcript-concept-extraction';
 
 const TRANSCRIPT_MAX = 50_000;
+const SEGMENT_CHAR_LIMIT = 1400;
 
-function normalizeType(t: unknown): ConceptType {
-  return t === 'main' || t === 'concept' || t === 'detail' ? t : 'concept';
+function asSegmentedConcepts(concepts: ConceptPayload[], segmentIndex: number) {
+  return concepts.map((c) => ({ ...c, segmentIndex }));
 }
 
-function assignIdsAndParents(raw: ConceptPayload[]): ConceptPayload[] {
-  const used = new Set<string>();
-  const withIds = raw.map((c, i) => {
-    let id = (c.id && String(c.id).trim()) || `c${i + 1}`;
-    let n = 0;
-    while (used.has(id)) {
-      n += 1;
-      id = `c${i + 1}_${n}`;
-    }
-    used.add(id);
-    const parent = c.parent === undefined || c.parent === '' ? null : String(c.parent).trim() || null;
-    return { ...c, id, parent };
-  });
-
-  const idSet = new Set(withIds.map((c) => c.id));
-  const mains = withIds.filter((c) => c.type === 'main');
-
-  return withIds.map((c) => {
-    let parent = c.parent ?? null;
-    if (parent && !idSet.has(parent)) {
-      parent = mains[0]?.id ?? null;
-    }
-    if (!parent && c.type !== 'main' && mains.length > 0) {
-      parent = mains[0].id;
-    }
-    return { ...c, parent };
-  });
-}
-
-function parseConceptsJson(content: string | null): ConceptPayload[] {
-  if (!content?.trim()) return [];
-  let text = content.trim();
-  if (text.startsWith('```')) {
-    const parts = text.split('```');
-    text = (parts[1] ?? parts[0]).trim();
-    if (text.toLowerCase().startsWith('json')) {
-      text = text.slice(4).trim();
-    }
+async function extractSegmentConcepts(
+  model: { generateContent: (prompt: string) => Promise<{ response: { text: () => string } }> },
+  segmentText: string,
+  segmentIndex: number,
+  totalSegments: number
+): Promise<ConceptPayload[]> {
+  const firstPrompt = hierarchyUserPrompt(segmentText, segmentIndex, totalSegments);
+  const first = await model.generateContent(firstPrompt);
+  const firstText = first.response.text();
+  let concepts = repairConceptHierarchy(parseConceptsJson(firstText), segmentIndex);
+  const firstValidation = validateConceptHierarchy(concepts);
+  if (firstValidation.valid) {
+    return concepts;
   }
-  try {
-    const parsed = JSON.parse(text) as { concepts?: unknown };
-    if (!Array.isArray(parsed.concepts)) return [];
-    const raw = parsed.concepts
-      .filter((c): c is Record<string, unknown> => c !== null && typeof c === 'object')
-      .map((c): ConceptPayload => {
-        const t = normalizeType(c.type);
-        const parentRaw = c.parent;
-        const parent =
-          parentRaw === null || parentRaw === undefined
-            ? null
-            : typeof parentRaw === 'string'
-              ? parentRaw.trim() || null
-              : null;
-        return {
-          id: typeof c.id === 'string' ? c.id.trim() : undefined,
-          label: String(c.label ?? '').trim() || 'Concept',
-          type: t,
-          explanation: typeof c.explanation === 'string' ? c.explanation : undefined,
-          parent,
-        };
-      })
-      .filter((c) => c.label.length > 0);
 
-    return assignIdsAndParents(raw);
-  } catch {
-    return [];
-  }
+  const repairPrompt = `Your previous output was invalid for strict hierarchy JSON.
+Return ONLY valid JSON object for the same segment.
+Fix these issues:
+${firstValidation.errors.map((e) => `- ${e}`).join('\n')}
+
+Original segment:
+${segmentText}
+
+Invalid output to repair:
+${firstText}`;
+  const second = await model.generateContent(repairPrompt);
+  const secondText = second.response.text();
+  concepts = repairConceptHierarchy(parseConceptsJson(secondText), segmentIndex);
+  return concepts;
 }
 
 export async function POST(request: NextRequest) {
@@ -118,35 +91,43 @@ export async function POST(request: NextRequest) {
     const result = await withGeminiModelFallback(apiKey, async (modelName, genAI) => {
       const model = genAI.getGenerativeModel({
         model: modelName,
-        systemInstruction: `You extract key concepts from lecture transcripts. Respond with a single JSON object (no markdown):
-{"concepts":[{"id":"c1","label":"short phrase","type":"main|concept|detail","explanation":"optional brief text","parent":null or "c1"}]}
-Rules:
-- Each concept MUST have a unique "id" (c1, c2, …).
-- "type" must be exactly: main, concept, or detail.
-- "parent" is the parent's "id", or null for root topics (type "main" roots use parent null).
-- Non-main concepts MUST have "parent" set to the id of the concept they support (usually a main or intermediate concept).
-- Prefer 3–8 concepts per segment; labels 2–6 words, domain-specific when possible.`,
+        systemInstruction: hierarchySystemInstruction(),
         generationConfig: {
           responseMimeType: 'application/json',
-          temperature: 0.5,
+          temperature: 0.3,
           maxOutputTokens: 1200,
         },
       });
-      return model.generateContent(`Transcript segment:\n${transcript.slice(0, 12000)}`);
+      const segments = splitTranscriptIntoSegments(transcript);
+      const truncatedSegments = segments.map((s) => ({
+        ...s,
+        text: s.text.slice(0, SEGMENT_CHAR_LIMIT),
+      }));
+
+      const extractedBySegment: Array<ConceptPayload & { segmentIndex: number }> = [];
+      for (const segment of truncatedSegments) {
+        const concepts = await extractSegmentConcepts(
+          model as { generateContent: (prompt: string) => Promise<{ response: { text: () => string } }> },
+          segment.text,
+          segment.index,
+          truncatedSegments.length
+        );
+        extractedBySegment.push(...asSegmentedConcepts(concepts, segment.index));
+      }
+
+      const merged = mergeSegmentConcepts(extractedBySegment);
+      const responseText = JSON.stringify({ concepts: merged });
+      return {
+        response: {
+          text: () => responseText,
+        },
+      };
     });
     const content = result.response.text();
     let concepts = parseConceptsJson(content ?? null);
 
     if (concepts.length === 0) {
-      concepts = [
-        {
-          id: 'c1',
-          label: transcript.slice(0, 50).trim() || 'Segment',
-          type: 'concept',
-          explanation: transcript.slice(0, 500),
-          parent: null,
-        },
-      ];
+      concepts = fallbackConceptsFromTranscript(transcript);
     }
 
     return NextResponse.json({ concepts });

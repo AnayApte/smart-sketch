@@ -28,6 +28,7 @@ export default function SessionPage() {
   const [chatInput, setChatInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [transcriptModalOpen, setTranscriptModalOpen] = useState(false);
@@ -128,12 +129,14 @@ export default function SessionPage() {
     }
   };
 
-  // Auto-scroll chat to the latest message
+  // Keep chat pinned to latest message as content streams in.
   useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
-  }, [chatMessages]);
+    const rafId = requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+    });
+
+    return () => cancelAnimationFrame(rafId);
+  }, [chatMessages, isSending]);
 
   useEffect(() => {
     if (!transcriptModalOpen) return;
@@ -283,6 +286,7 @@ export default function SessionPage() {
                       </div>
                     </div>
                   )}
+                  <div ref={messagesEndRef} aria-hidden="true" />
                 </div>
                 <form className="shrink-0 border-t border-surface-border p-4 flex gap-3" onSubmit={handleChatSubmit}>
                   <input

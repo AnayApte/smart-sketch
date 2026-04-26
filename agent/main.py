@@ -72,7 +72,6 @@ _FREE_TIER_MODEL_TAIL = [
     "gemini-1.5-flash",
 ]
 
-
 def _dedupe_models(models: List[str]) -> List[str]:
     seen = set()
     out: List[str] = []
@@ -168,6 +167,9 @@ class TranscriptProcessor:
 
         self.transcript_buffer.append(text)
         self.full_transcript.append(text)
+        # Publish finalized transcript chunks immediately so UI is not blocked by
+        # concept extraction/model latency.
+        asyncio.create_task(self.send_transcript_update(text))
         
         buffer_length = sum(len(t) for t in self.transcript_buffer)
         print(f"[TRANSCRIPT ADDED] '{text}' - buffer now has {buffer_length} chars, is_processing={self.is_processing}")
@@ -191,6 +193,23 @@ class TranscriptProcessor:
             asyncio.create_task(self.process_batch())
         else:
             print(f"[BATCH] Not ready: time={time_since_last_batch:.1f}s (need {BATCH_INTERVAL_SECONDS}s), length={buffer_length} chars")
+
+    async def send_transcript_update(self, transcript: str):
+        """Sends a transcript-only update to the frontend immediately."""
+        message = {
+            "type": "transcript",
+            "data": {
+                "transcript": transcript,
+                "timestamp": datetime.now().isoformat(),
+            },
+        }
+
+        message_bytes = json.dumps(message).encode("utf-8")
+        await self.room.local_participant.publish_data(
+            message_bytes,
+            reliable=True,
+            topic="smartsketch",
+        )
 
     async def process_batch(self):
         """
@@ -222,7 +241,7 @@ class TranscriptProcessor:
             print(f"[BATCH] Gemini returned {len(concepts)} concepts")
 
             # Send concepts back to the React app via Data Channel
-            await self.send_to_frontend(concepts, batch_text)
+            await self.send_to_frontend(concepts)
             
             print(f"[BATCH] Completed - extracted {len(concepts)} concepts")
 
@@ -376,7 +395,7 @@ Transcript to analyze:
             print(f"[ERROR] Gemini API error (exhausted model chain): {last_error}")
         return []
 
-    async def send_to_frontend(self, concepts: List[dict], transcript: str):
+    async def send_to_frontend(self, concepts: List[dict]):
         """
         Sends the extracted concepts back to the React app.
 
@@ -397,7 +416,6 @@ Transcript to analyze:
             "type": "concepts",
             "data": {
                 "concepts": concepts,
-                "transcript": transcript,
                 "timestamp": datetime.now().isoformat()
             }
         }

@@ -15,6 +15,7 @@ import NeuralNetworkBackground from '@/components/NeuralNetworkBackground';
 import { findSimilarConcept } from '@/lib/concept-dedup';
 import { authFetch } from '@/lib/auth-fetch';
 import type { ConceptPayload } from '@/lib/concept-types';
+import { buildMindMapLayout } from '@/lib/mind-map-layout';
 
 type ConceptData = ConceptPayload;
 
@@ -48,6 +49,28 @@ function getNodePlainLabel(node: Node): string {
   return typeof text === 'string' ? text.trim() : '';
 }
 
+function createRecordCenterFlowNode(): Node {
+  return {
+    id: 'center',
+    data: { label: 'Lecture', plainLabel: 'Lecture' },
+    position: { x: 250, y: 200 },
+    style: {
+      background: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
+      color: '#0c0f14',
+      border: 'none',
+      borderRadius: '50%',
+      width: 100,
+      height: 100,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: '14px',
+      fontWeight: 'bold',
+      boxShadow: '0 0 30px rgba(20, 184, 166, 0.4)',
+    },
+  };
+}
+
 interface AgentMessage {
   type: 'agent_ready' | 'concepts' | 'transcript';
   data: {
@@ -63,12 +86,62 @@ function isLiveKitConfigured(): boolean {
   return typeof url === 'string' && url.trim().length > 0;
 }
 
+/** LiveKit worker identity often contains `agent`; name may include `smartsketch-worker`. */
+function remoteParticipantLooksLikeAgent(identity: string | undefined): boolean {
+  if (!identity) return false;
+  const id = identity.toLowerCase();
+  return id.includes('agent') || id.includes('smartsketch-worker');
+}
+
+function roomHasAgentLikeParticipant(room: Room): boolean {
+  const remotes = Array.from(room.remoteParticipants.values());
+  for (let i = 0; i < remotes.length; i++) {
+    if (remoteParticipantLooksLikeAgent(remotes[i].identity)) return true;
+  }
+  return false;
+}
+
+function debugLog(hypothesisId: string, location: string, message: string, data: Record<string, unknown>) {
+  void hypothesisId;
+  void location;
+  void message;
+  void data;
+}
+
+const DEBUG_DEMO_TRANSCRIPT = [
+  'Welcome everyone. Today we are building a systems-level understanding of photosynthesis and why it is central to life on Earth.',
+  'Photosynthesis converts light energy into chemical energy stored in carbohydrates. The process happens primarily in chloroplasts, which contain the thylakoid membrane system and the stroma.',
+  'In the light-dependent reactions, photons excite chlorophyll in photosystem II and photosystem I. This excitation drives electron transport through membrane protein complexes.',
+  'As electrons move through the electron transport chain, proton pumping creates an electrochemical gradient across the thylakoid membrane.',
+  'ATP synthase uses that proton motive force to produce ATP from ADP and inorganic phosphate, while NADP+ is reduced to NADPH.',
+  'Water splitting replenishes electrons in photosystem II and releases oxygen as a byproduct, which is critical for aerobic organisms.',
+  'The Calvin cycle occurs in the stroma and uses ATP and NADPH to convert carbon dioxide into glyceraldehyde-3-phosphate, often abbreviated as G3P.',
+  'Rubisco catalyzes carbon fixation by attaching CO2 to ribulose-1,5-bisphosphate. This forms unstable intermediates that are converted into 3-phosphoglycerate.',
+  'The cycle includes fixation, reduction, and regeneration phases. Regeneration is essential because it recreates RuBP so the cycle can continue.',
+  'Environmental constraints such as heat stress and low CO2 can increase photorespiration, which lowers photosynthetic efficiency.',
+  'C4 and CAM pathways are adaptive strategies that reduce photorespiration in specific climates by changing when or where CO2 is concentrated.',
+  'As a final synthesis, remember the core flow: light energy drives ATP and NADPH production, and those molecules power carbon fixation into sugars that fuel growth and metabolism.',
+].join(' ');
+
 export default function RecordPage() {
   const { user } = useAuth();
+  const userRef = useRef(user);
+  userRef.current = user;
   const videoRef = useRef<HTMLVideoElement>(null);
   const roomRef = useRef<Room | null>(null);
   /** Bumped on each full reconnect so stale `room.connect()` resolutions cannot flip React state. */
   const liveKitConnectGenerationRef = useRef(0);
+  const liveKitConnectInFlightRef = useRef(false);
+  /** True only while `await room.connect(...)` is in flight (outer `finally` can clear inFlight too early for guards). */
+  const liveKitAwaitingRoomConnectRef = useRef(false);
+  /** React 18 dev Strict Mode runs mount→unmount→mount; avoid tearing down LiveKit on the first synthetic unmount. */
+  const recordPageMountGenerationRef = useRef(0);
+  const strictCleanupDisconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** When `/api/livekit/token` returns 429, avoid hammering the server in a tight reconnect loop. */
+  const liveKitTokenRetryAfterMsRef = useRef(0);
+  /** First time we were connected without agent; used so brief disconnect/reconnect does not reset the 25s grace window. */
+  const waitingForAgentSinceMsRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -112,34 +185,12 @@ export default function RecordPage() {
   const router = useRouter();
 
   // React Flow nodes and edges - will be updated by agent
-  const [nodes, setNodes] = useState<Node[]>([
-    {
-      id: 'center',
-      data: { label: 'Lecture', plainLabel: 'Lecture' },
-      position: { x: 250, y: 200 },
-      style: {
-        background: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
-        color: '#0c0f14',
-        border: 'none',
-        borderRadius: '50%',
-        width: 100,
-        height: 100,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize: '14px',
-        fontWeight: 'bold',
-        boxShadow: '0 0 30px rgba(20, 184, 166, 0.4)',
-      },
-    },
-  ]);
+  const [nodes, setNodes] = useState<Node[]>([createRecordCenterFlowNode()]);
 
   const [edges, setEdges] = useState<Edge[]>([]);
 
-  // Track node positions by ID for parent-child positioning
-  const nodePositionsRef = useRef<Map<string, { x: number; y: number; childCount: number }>>(
-    new Map([['center', { x: 250, y: 200, childCount: 0 }]])
-  );
+  /** All concepts merged across batches (stable ids + parents) for tree relayout. */
+  const accumulatedConceptsRef = useRef<ConceptPayload[]>([]);
   const nodeCounterRef = useRef(0);
   const nodesRef = useRef<Node[]>([]);
   const localSttBufferRef = useRef('');
@@ -168,139 +219,83 @@ export default function RecordPage() {
     };
   }, [transcriptModal]);
 
-  // Add multiple concepts to the mind map with proper hierarchy
+  // Merge concepts across batches, then apply shared tree layout (no overlapping radial fan).
   const addConceptsToMap = useCallback((concepts: ConceptData[]) => {
-    const colors = {
-      main: { bg: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)', border: '#0d9488', text: '#0c0f14' },
-      concept: { bg: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', border: '#d97706', text: '#0c0f14' },
-      detail: { bg: 'linear-gradient(135deg, #1a1f2b 0%, #12161e 100%)', border: 'rgba(255,255,255,0.1)', text: '#f0f2f5' },
-    };
-
-    const prevNodes = nodesRef.current;
-    const existingNodesByLabel = new Map<string, string>();
-    prevNodes.forEach((node) => {
-      if (node.id === 'center') return;
-      const nodeLabel = getNodePlainLabel(node);
-      if (nodeLabel) existingNodesByLabel.set(nodeLabel, node.id);
+    // #region agent log H3
+    debugLog('H3', 'record/page.tsx:addConceptsToMap:entry', 'addConceptsToMap called', {
+      conceptsCount: concepts.length,
+      sampleLabels: concepts.slice(0, 3).map((c) => c.label),
+      existingNodeCount: nodesRef.current.length,
     });
+    // #endregion
 
-    const newNodes: Node[] = [];
-    const newEdges: Edge[] = [];
-    const conceptIdMapping = new Map<string, string>();
+    const accumulated = accumulatedConceptsRef.current;
+    const existingForDedup = accumulated.map((c) => ({ id: c.id as string, label: c.label }));
+    const batchMapping = new Map<string, string>();
+    const newAcc: ConceptPayload[] = [...accumulated];
 
     const sortedConcepts = [...concepts].sort((a, b) => {
       const order = { main: 0, concept: 1, detail: 2 };
       return order[a.type] - order[b.type];
     });
 
+    let added = 0;
     sortedConcepts.forEach((concept, idx) => {
       const agentKey = (concept.id && String(concept.id).trim()) || `__idx${idx}`;
 
-      const similarNodeId = findSimilarConcept(
-        concept.label,
-        Array.from(existingNodesByLabel.entries()).map(([label, id]) => ({ id, label })),
-        0.75
-      );
-
+      const similarNodeId = findSimilarConcept(concept.label, existingForDedup, 0.75);
       if (similarNodeId) {
-        conceptIdMapping.set(agentKey, similarNodeId);
+        batchMapping.set(agentKey, similarNodeId);
         console.log(`[DEDUP] Merged "${concept.label}" with existing "${similarNodeId}"`);
         return;
       }
 
-      const nodeId = `n${++nodeCounterRef.current}`;
-      conceptIdMapping.set(agentKey, nodeId);
-      existingNodesByLabel.set(concept.label, nodeId);
+      const stableId = `n${++nodeCounterRef.current}`;
+      batchMapping.set(agentKey, stableId);
+      existingForDedup.push({ id: stableId, label: concept.label });
 
-      let parentId = 'center';
-      if (concept.parent) {
-        parentId =
-          conceptIdMapping.get(concept.parent) ||
-          (nodePositionsRef.current.has(concept.parent) ? concept.parent : 'center');
-      } else if (concept.type === 'main') {
-        parentId = 'center';
+      const rawParent = concept.parent && String(concept.parent).trim();
+      let parentId: string | null = null;
+      if (rawParent) {
+        if (batchMapping.has(rawParent)) {
+          parentId = batchMapping.get(rawParent)!;
+        } else if (accumulated.some((c) => c.id === rawParent)) {
+          parentId = rawParent;
+        } else {
+          parentId = null;
+        }
       }
 
-      const parentPos = nodePositionsRef.current.get(parentId) || { x: 250, y: 200, childCount: 0 };
-
-      let x: number;
-      let y: number;
-      const childIndex = parentPos.childCount;
-
-      if (concept.type === 'main') {
-        const angle = (childIndex * Math.PI) / 3 - Math.PI / 2;
-        const radius = 180;
-        x = parentPos.x + radius * Math.cos(angle);
-        y = parentPos.y + radius * Math.sin(angle);
-      } else if (concept.type === 'concept') {
-        const baseAngle = Math.atan2(parentPos.y - 200, parentPos.x - 250);
-        const spread = Math.PI / 4;
-        const angle = baseAngle + (childIndex - parentPos.childCount / 2) * spread;
-        const radius = 140;
-        x = parentPos.x + radius * Math.cos(angle);
-        y = parentPos.y + radius * Math.sin(angle);
-      } else {
-        const baseAngle = Math.atan2(parentPos.y - 200, parentPos.x - 250);
-        const spread = Math.PI / 5;
-        const angle = baseAngle + (childIndex - 0.5) * spread;
-        const radius = 100;
-        x = parentPos.x + radius * Math.cos(angle);
-        y = parentPos.y + radius * Math.sin(angle);
-      }
-
-      parentPos.childCount++;
-      nodePositionsRef.current.set(nodeId, { x, y, childCount: 0 });
-
-      const color = colors[concept.type] || colors.concept;
-
-      newNodes.push({
-        id: nodeId,
-        data: {
-          plainLabel: concept.label,
-          label: (
-            <div className="text-center">
-              <div className="font-semibold">{concept.label}</div>
-              {concept.explanation && (
-                <div className="text-xs opacity-75 mt-1 line-clamp-2">{concept.explanation}</div>
-              )}
-            </div>
-          ),
-        },
-        position: { x, y },
-        draggable: true,
-        style: {
-          background: color.bg,
-          color: color.text,
-          border: `1px solid ${color.border}`,
-          borderRadius: concept.type === 'main' ? '16px' : '12px',
-          padding: concept.type === 'main' ? '14px 20px' : '10px 14px',
-          fontSize: concept.type === 'main' ? '14px' : '12px',
-          fontWeight: concept.type === 'main' ? '600' : '500',
-          maxWidth: concept.type === 'detail' ? '120px' : '160px',
-          boxShadow:
-            concept.type === 'main'
-              ? '0 0 30px rgba(20, 184, 166, 0.3)'
-              : '0 4px 20px rgba(0, 0, 0, 0.3)',
-          cursor: 'grab',
-        },
+      newAcc.push({
+        ...concept,
+        id: stableId,
+        parent: parentId ?? undefined,
       });
-
-      const edgeColor =
-        concept.type === 'main' ? '#14b8a6' : concept.type === 'concept' ? '#f59e0b' : '#4b5563';
-      newEdges.push({
-        id: `edge-${nodeId}`,
-        source: parentId,
-        target: nodeId,
-        type: 'smoothstep',
-        animated: concept.type === 'main',
-        style: { stroke: edgeColor, strokeWidth: concept.type === 'main' ? 2 : 1.5 },
-      });
+      added++;
     });
 
-    if (newNodes.length > 0) {
-      setNodes((prev) => [...prev, ...newNodes]);
-      setEdges((prev) => [...prev, ...newEdges]);
-    }
+    accumulatedConceptsRef.current = newAcc;
+
+    const { nodes: layoutNodes, edges: layoutEdges } = buildMindMapLayout(
+      newAcc,
+      {
+        mode: 'external-root',
+        rootId: 'center',
+        lectureAnchor: { x: 250, y: 200, height: 100, gapAfter: 28 },
+      },
+      'record'
+    );
+
+    setNodes([createRecordCenterFlowNode(), ...layoutNodes]);
+    setEdges(layoutEdges);
+
+    // #region agent log H3
+    debugLog('H3', 'record/page.tsx:addConceptsToMap:exit', 'addConceptsToMap completed', {
+      newNodes: added,
+      totalConcepts: newAcc.length,
+      dedupedOrSkipped: Math.max(0, concepts.length - added),
+    });
+    // #endregion
   }, []);
 
   // Handle messages from the agent
@@ -314,12 +309,15 @@ export default function RecordPage() {
         break;
 
       case 'concepts':
+        // #region agent log H1
+        debugLog('H1', 'record/page.tsx:handleAgentMessage:concepts', 'agent concepts message received', {
+          conceptsCount: message.data.concepts?.length ?? 0,
+          hasTranscript: !!message.data.transcript,
+        });
+        // #endregion
         if (message.data.concepts && message.data.concepts.length > 0) {
           // Add all concepts at once to properly handle parent-child relationships
           addConceptsToMap(message.data.concepts);
-        }
-        if (message.data.transcript) {
-          setTranscripts((prev) => [...prev, message.data.transcript!]);
         }
         break;
 
@@ -331,57 +329,98 @@ export default function RecordPage() {
     }
   }, [addConceptsToMap]);
 
+  const handleAgentMessageRef = useRef(handleAgentMessage);
+  handleAgentMessageRef.current = handleAgentMessage;
+
   // Connect to LiveKit room (without publishing tracks)
   const connectToLiveKit = useCallback(async () => {
     console.log('[LiveKit] Starting connection process...');
+    // #region agent log H6
+    debugLog('H6', 'record/page.tsx:connectToLiveKit:start', 'connectToLiveKit invoked', {
+      hasRoomRef: !!roomRef.current,
+      roomState: roomRef.current?.state ?? null,
+      liveKitConfigured: isLiveKitConfigured(),
+      inFlight: liveKitConnectInFlightRef.current,
+    });
+    // #endregion
 
-    const existing = roomRef.current;
-    if (existing) {
-      const st = existing.state;
-      // Do not tear down the client while LiveKit is connecting or reconnecting — that
-      // caused overlapping connects to abort with "Client initiated disconnect".
-      if (st === ConnectionState.Connected) {
-        console.log('[LiveKit] Already connected, skipping connection');
-        setLiveKitConnected(true);
-        setAgentReady(true);
-        return;
-      }
-      if (
-        st === ConnectionState.Connecting ||
-        st === ConnectionState.Reconnecting ||
-        st === ConnectionState.SignalReconnecting
-      ) {
-        setLiveKitConnected(true);
-        return;
-      }
+    if (liveKitConnectInFlightRef.current) {
+      // #region agent log H6
+      debugLog('H6', 'record/page.tsx:connectToLiveKit:skip', 'connect skipped because another connect is in flight', {
+        roomState: roomRef.current?.state ?? null,
+      });
+      // #endregion
+      return;
     }
-
-    // Cleanup any existing connection first (only when disconnected or no room)
-    if (roomRef.current) {
-      console.log('[LiveKit] Cleaning up existing connection...');
-      try {
-        await roomRef.current.disconnect();
-      } catch (e) {
-        console.log('[LiveKit] Error disconnecting existing room:', e);
-      }
-      roomRef.current = null;
-    }
+    liveKitConnectInFlightRef.current = true;
 
     try {
+      const existing = roomRef.current;
+      if (existing) {
+        const st = existing.state;
+        // Do not tear down the client while LiveKit is connecting or reconnecting — that
+        // caused overlapping connects to abort with "Client initiated disconnect".
+        if (st === ConnectionState.Connected) {
+          console.log('[LiveKit] Already connected, skipping connection');
+          setLiveKitConnected(true);
+          setAgentReady(true);
+          return;
+        }
+        if (
+          st === ConnectionState.Connecting ||
+          st === ConnectionState.Reconnecting ||
+          st === ConnectionState.SignalReconnecting
+        ) {
+          setLiveKitConnected(true);
+          return;
+        }
+      }
+
+      // Cleanup any existing connection first (only when disconnected or no room)
+      if (roomRef.current) {
+        console.log('[LiveKit] Cleaning up existing connection...');
+        try {
+          await roomRef.current.disconnect();
+        } catch (e) {
+          console.log('[LiveKit] Error disconnecting existing room:', e);
+        }
+        roomRef.current = null;
+      }
+
       // Fetch token from our API with unique room name
       const roomName = `smartsketch-${sessionIdRef.current}`;
-      const username = user?.id ? `student-${user.id.slice(0, 8)}` : `student-${Date.now()}`;
+      const u = userRef.current;
+      const username = u?.id ? `student-${u.id.slice(0, 8)}` : `student-${Date.now()}`;
       console.log('[LiveKit] Fetching token for room:', roomName, 'user:', username);
       const response = await authFetch(
         `/api/livekit/token?room=${encodeURIComponent(roomName)}&username=${encodeURIComponent(username)}`
       );
       console.log('[LiveKit] API response status:', response.status, response.statusText);
+      // #region agent log H6
+      debugLog('H6', 'record/page.tsx:connectToLiveKit:token', 'livekit token response', {
+        status: response.status,
+        ok: response.ok,
+        roomName,
+      });
+      // #endregion
       
       if (!response.ok) {
         const errorText = await response.text();
         console.error('[LiveKit] API error response:', errorText);
+        if (response.status === 429) {
+          const retryMs = 15_000;
+          liveKitTokenRetryAfterMsRef.current = Date.now() + retryMs;
+          // #region agent log H11
+          debugLog('H11', 'record/page.tsx:connectToLiveKit:token429', 'livekit token rate limited; backing off', {
+            retryMs,
+            roomName,
+          });
+          // #endregion
+        }
         throw new Error(`Failed to fetch LiveKit token: ${response.status} ${errorText}`);
       }
+
+      liveKitTokenRetryAfterMsRef.current = 0;
       
       const data = await response.json();
       console.log('[LiveKit] API response data:', data);
@@ -417,6 +456,13 @@ export default function RecordPage() {
       // Listen for data messages from the agent
       room.on(RoomEvent.DataReceived, (payload: Uint8Array, participant?: RemoteParticipant | LocalParticipant, kind?: DataPacket_Kind, topic?: string) => {
         console.log('[LiveKit] Data received:', { topic, payloadSize: payload.length, participant: participant?.name });
+        // #region agent log H1
+        debugLog('H1', 'record/page.tsx:RoomEvent.DataReceived', 'livekit data received', {
+          topic: topic ?? null,
+          payloadSize: payload.length,
+          participant: participant?.identity ?? participant?.name ?? null,
+        });
+        // #endregion
         
         // Log raw payload for debugging
         try {
@@ -430,12 +476,24 @@ export default function RecordPage() {
           try {
             const message: AgentMessage = JSON.parse(new TextDecoder().decode(payload));
             console.log('[LiveKit] Parsed message:', message);
+            // #region agent log H1
+            debugLog('H1', 'record/page.tsx:RoomEvent.DataReceived:parsed', 'smartsketch payload parsed', {
+              type: message.type,
+              conceptsCount: message.data?.concepts?.length ?? 0,
+              hasTranscript: !!message.data?.transcript,
+            });
+            // #endregion
             // If we receive any message from agent, it's ready
             console.log('[LiveKit] Agent is ready (received data message)');
             setAgentReady(true);
-            handleAgentMessage(message);
+            handleAgentMessageRef.current(message);
           } catch (e) {
             console.error('[LiveKit] Failed to parse agent message:', e);
+            // #region agent log H1
+            debugLog('H1', 'record/page.tsx:RoomEvent.DataReceived:parseError', 'smartsketch payload parse failed', {
+              error: e instanceof Error ? e.message : String(e),
+            });
+            // #endregion
           }
         } else {
           console.log('[LiveKit] Data received on unexpected topic:', topic, '(expected: smartsketch)');
@@ -444,10 +502,22 @@ export default function RecordPage() {
 
       // Connect to room (but don't publish tracks yet)
       console.log('[LiveKit] Connecting to room...');
-      await room.connect(livekitUrl, token, {
-        autoSubscribe: true,
-      });
+      liveKitAwaitingRoomConnectRef.current = true;
+      try {
+        await room.connect(livekitUrl, token, {
+          autoSubscribe: true,
+        });
+      } finally {
+        liveKitAwaitingRoomConnectRef.current = false;
+      }
       if (connectGen !== liveKitConnectGenerationRef.current || roomRef.current !== room) {
+        // #region agent log H7
+        debugLog('H7', 'record/page.tsx:connectToLiveKit:aborted', 'connect aborted after room.connect (stale generation or room ref replaced)', {
+          connectGen,
+          currentGen: liveKitConnectGenerationRef.current,
+          roomRefMatches: roomRef.current === room,
+        });
+        // #endregion
         try {
           await room.disconnect();
         } catch {
@@ -459,13 +529,28 @@ export default function RecordPage() {
         return;
       }
       console.log('[LiveKit] ✅ Connected to LiveKit room:', room.name);
+      // #region agent log H6
+      debugLog('H6', 'record/page.tsx:connectToLiveKit:connected', 'room connected', {
+        room: room.name,
+      });
+      // #endregion
       setLiveKitConnected(true);
       console.log('[LiveKit] State updated - liveKitConnected set to true');
+
+      if (roomHasAgentLikeParticipant(room)) {
+        console.log('[LiveKit] Agent already in room (participant scan), setting agentReady to true');
+        setAgentReady(true);
+      }
 
       // Listen for participant joined events (to detect when agent joins)
       room.on(RoomEvent.ParticipantConnected, (participant) => {
         console.log('[LiveKit] Participant connected:', participant.identity);
-        if (participant.identity?.includes('agent')) {
+        // #region agent log H6
+        debugLog('H6', 'record/page.tsx:RoomEvent.ParticipantConnected', 'participant connected', {
+          identity: participant.identity ?? null,
+        });
+        // #endregion
+        if (remoteParticipantLooksLikeAgent(participant.identity)) {
           console.log('[LiveKit] Agent participant detected, setting agentReady to true');
           setAgentReady(true);
         }
@@ -474,6 +559,11 @@ export default function RecordPage() {
       // Listen for disconnection events to properly update state
       room.on(RoomEvent.Disconnected, (reason) => {
         console.log('[LiveKit] Room disconnected, reason:', reason);
+        // #region agent log H6
+        debugLog('H6', 'record/page.tsx:RoomEvent.Disconnected', 'room disconnected', {
+          reason: String(reason ?? ''),
+        });
+        // #endregion
         setLiveKitConnected(false);
         setAgentReady(false);
       });
@@ -486,6 +576,11 @@ export default function RecordPage() {
       room.on(RoomEvent.Reconnected, () => {
         console.log('[LiveKit] Room reconnected');
         setLiveKitConnected(true);
+        const r = roomRef.current;
+        if (r && roomHasAgentLikeParticipant(r)) {
+          console.log('[LiveKit] Agent present after reconnect, setting agentReady to true');
+          setAgentReady(true);
+        }
       });
 
       // Listen for track events to debug issues
@@ -499,7 +594,7 @@ export default function RecordPage() {
 
       room.on(RoomEvent.ParticipantDisconnected, (participant) => {
         console.log('[LiveKit] Participant disconnected:', participant.identity);
-        if (participant.identity?.includes('agent')) {
+        if (remoteParticipantLooksLikeAgent(participant.identity)) {
           console.warn('[LiveKit] Agent disconnected!');
           setAgentReady(false);
         }
@@ -511,11 +606,35 @@ export default function RecordPage() {
 
     } catch (error) {
       console.error('[LiveKit] ❌ Connection error:', error);
+      // #region agent log H6
+      debugLog('H6', 'record/page.tsx:connectToLiveKit:error', 'connectToLiveKit failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // #endregion
+      const failedRoom = roomRef.current;
+      if (failedRoom) {
+        try {
+          await failedRoom.disconnect();
+        } catch {
+          /* ignore */
+        }
+        if (roomRef.current === failedRoom) {
+          roomRef.current = null;
+        }
+      }
       setLiveKitConnected(false);
       setAgentReady(false);
       setAllowStartWithoutAgent(true);
+    } finally {
+      liveKitConnectInFlightRef.current = false;
+      // #region agent log H6
+      debugLog('H6', 'record/page.tsx:connectToLiveKit:finally', 'connectToLiveKit finished', {
+        inFlight: liveKitConnectInFlightRef.current,
+        liveKitConnectedState: roomRef.current?.state ?? null,
+      });
+      // #endregion
     }
-  }, [handleAgentMessage]);
+  }, []);
 
   // Store cloned tracks for LiveKit (so we don't lose the original stream when LiveKit unpublishes)
   const clonedTracksRef = useRef<MediaStreamTrack[]>([]);
@@ -524,6 +643,14 @@ export default function RecordPage() {
   // Returns true if successful, false if failed
   const publishTracksToLiveKit = useCallback(async (mediaStream: MediaStream): Promise<boolean> => {
     console.log('[Publish] Starting track publication...');
+    // #region agent log H8
+    debugLog('H8', 'record/page.tsx:publishTracksToLiveKit:start', 'publishTracksToLiveKit invoked', {
+      hasRoom: !!roomRef.current,
+      roomState: roomRef.current?.state ?? null,
+      audioTracks: mediaStream.getAudioTracks().length,
+      videoTracks: mediaStream.getVideoTracks().length,
+    });
+    // #endregion
 
     // Helper to check if room is connected (avoids TypeScript narrowing issues)
     const isConnected = () => roomRef.current?.state === ConnectionState.Connected;
@@ -531,6 +658,12 @@ export default function RecordPage() {
     // If room doesn't exist or is disconnected, try to reconnect
     if (!roomRef.current || !isConnected()) {
       console.log('[Publish] Room not connected, attempting to reconnect...');
+      // #region agent log H8
+      debugLog('H8', 'record/page.tsx:publishTracksToLiveKit:reconnect', 'room missing or not connected; calling connectToLiveKit', {
+        hasRoom: !!roomRef.current,
+        roomState: roomRef.current?.state ?? null,
+      });
+      // #endregion
 
       // Try to reconnect
       await connectToLiveKit();
@@ -544,6 +677,12 @@ export default function RecordPage() {
 
       if (!isConnected()) {
         console.error('[Publish] ❌ Failed to reconnect to room');
+        // #region agent log H8
+        debugLog('H8', 'record/page.tsx:publishTracksToLiveKit:reconnectFailed', 'reconnect wait exhausted; still not connected', {
+          hasRoom: !!roomRef.current,
+          roomState: roomRef.current?.state ?? null,
+        });
+        // #endregion
         return false;
       }
 
@@ -603,6 +742,11 @@ export default function RecordPage() {
       return true;
     } catch (error) {
       console.error('[Publish] ❌ Failed to publish tracks:', error);
+      // #region agent log H8
+      debugLog('H8', 'record/page.tsx:publishTracksToLiveKit:error', 'publishTracksToLiveKit failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // #endregion
       return false;
     }
   }, [connectToLiveKit]);
@@ -610,6 +754,35 @@ export default function RecordPage() {
   // Disconnect from LiveKit
   const disconnectFromLiveKit = useCallback(async () => {
     console.log('[LiveKit] Disconnecting from room...');
+    const r = roomRef.current;
+    const rs = r?.state ?? null;
+    const midConnect =
+      liveKitConnectInFlightRef.current ||
+      liveKitAwaitingRoomConnectRef.current ||
+      rs === ConnectionState.Connecting ||
+      rs === ConnectionState.Reconnecting ||
+      rs === ConnectionState.SignalReconnecting;
+    // #region agent log H13
+    debugLog('H13', 'record/page.tsx:disconnectFromLiveKit:decision', 'disconnectFromLiveKit guard', {
+      hasRoom: !!r,
+      roomState: rs,
+      connectInFlight: liveKitConnectInFlightRef.current,
+      awaitingRoomConnect: liveKitAwaitingRoomConnectRef.current,
+      willSkip: midConnect,
+    });
+    // #endregion
+
+    // If we're mid-connect, disconnecting here surfaces as "Client initiated disconnect" on the in-flight connect.
+    if (midConnect) {
+      // #region agent log H11
+      debugLog('H11', 'record/page.tsx:disconnectFromLiveKit:skipped', 'skipped disconnect during connect/reconnect', {
+        roomState: rs,
+        connectInFlight: liveKitConnectInFlightRef.current,
+        awaitingRoomConnect: liveKitAwaitingRoomConnectRef.current,
+      });
+      // #endregion
+      return;
+    }
 
     // Stop all cloned tracks first
     clonedTracksRef.current.forEach(track => {
@@ -633,11 +806,31 @@ export default function RecordPage() {
       roomRef.current = null;
       setLiveKitConnected(false);
       setAgentReady(false);
+      waitingForAgentSinceMsRef.current = null;
     }
+    // #region agent log H7
+    debugLog('H7', 'record/page.tsx:disconnectFromLiveKit:end', 'disconnectFromLiveKit finished', {
+      hasRoom: !!roomRef.current,
+    });
+    // #endregion
   }, []);
 
   useEffect(() => {
+    // #region agent log H12
+    debugLog('H12', 'record/page.tsx:permissionsEffect:start', 'permissions effect started', {
+      hasStreamRef: !!streamRef.current,
+    });
+    // #endregion
+    if (strictCleanupDisconnectTimerRef.current) {
+      clearTimeout(strictCleanupDisconnectTimerRef.current);
+      strictCleanupDisconnectTimerRef.current = null;
+    }
+    recordPageMountGenerationRef.current += 1;
+
     const requestPermissions = async () => {
+      if (streamRef.current) {
+        return;
+      }
       console.log('[Permissions] Requesting camera and microphone access...');
       try {
         const mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -649,6 +842,7 @@ export default function RecordPage() {
         });
 
         console.log('[Permissions] Access granted, setting stream');
+        streamRef.current = mediaStream;
         setStream(mediaStream);
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream;
@@ -689,13 +883,66 @@ export default function RecordPage() {
 
     return () => {
       console.log('[Cleanup] Component unmounting, cleaning up resources...');
-      if (stream) {
-        stream.getTracks().forEach((track) => {
+      // #region agent log H12
+      debugLog('H12', 'record/page.tsx:permissionsEffect:cleanup', 'permissions effect cleanup invoked', {
+        hasStreamRef: !!streamRef.current,
+      });
+      // #endregion
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => {
           track.stop();
           console.log('[Cleanup] Stopped track:', track.kind);
         });
+        streamRef.current = null;
       }
-      disconnectFromLiveKit();
+    };
+  }, []);
+
+  // LiveKit teardown on unmount only (decoupled from media stream updates so we do not abort in-flight `room.connect`).
+  useEffect(() => {
+    return () => {
+      const gen = ++recordPageMountGenerationRef.current;
+      const isDev = process.env.NODE_ENV !== 'production';
+      const shouldDeferDisconnect =
+        isDev &&
+        gen === 1 &&
+        (liveKitConnectInFlightRef.current ||
+          liveKitAwaitingRoomConnectRef.current ||
+          roomRef.current?.state === ConnectionState.Connecting ||
+          roomRef.current?.state === ConnectionState.Reconnecting ||
+          roomRef.current?.state === ConnectionState.SignalReconnecting);
+
+      if (strictCleanupDisconnectTimerRef.current) {
+        clearTimeout(strictCleanupDisconnectTimerRef.current);
+        strictCleanupDisconnectTimerRef.current = null;
+      }
+
+      if (shouldDeferDisconnect) {
+        // #region agent log H10
+        debugLog('H10', 'record/page.tsx:livekitUnmount:deferDisconnect', 'deferring LiveKit disconnect (likely React StrictMode remount)', {
+          gen,
+          roomState: roomRef.current?.state ?? null,
+          connectInFlight: liveKitConnectInFlightRef.current,
+          awaitingRoomConnect: liveKitAwaitingRoomConnectRef.current,
+        });
+        // #endregion
+        strictCleanupDisconnectTimerRef.current = setTimeout(() => {
+          strictCleanupDisconnectTimerRef.current = null;
+          if (recordPageMountGenerationRef.current !== gen) {
+            // #region agent log H10
+            debugLog('H10', 'record/page.tsx:livekitUnmount:deferDisconnect:cancelled', 'skipped deferred disconnect after remount', {
+              gen,
+              currentGen: recordPageMountGenerationRef.current,
+            });
+            // #endregion
+            return;
+          }
+          void disconnectFromLiveKit();
+        }, 0);
+        return;
+      }
+
+      void disconnectFromLiveKit();
     };
   }, [disconnectFromLiveKit]);
 
@@ -710,21 +957,44 @@ export default function RecordPage() {
   useEffect(() => {
     console.log('[Connection Check] stream:', !!stream, 'liveKitConnected:', liveKitConnected);
     if (stream && isLiveKitConfigured() && !liveKitConnected) {
+      const now = Date.now();
+      if (now < liveKitTokenRetryAfterMsRef.current) {
+        // #region agent log H11
+        debugLog('H11', 'record/page.tsx:connectEffect:backoff', 'skipping connectToLiveKit during token backoff', {
+          waitMs: liveKitTokenRetryAfterMsRef.current - now,
+        });
+        // #endregion
+        return;
+      }
       console.log('[Connection] Initiating LiveKit connection...');
       connectToLiveKit();
     }
   }, [stream, liveKitConnected, connectToLiveKit]);
 
   // If LiveKit is on but the agent never signals ready, allow starting (local audio + mind map without agent).
+  // Grace deadline is anchored in a ref so brief disconnect/reconnect does not keep resetting the 25s timer.
   useEffect(() => {
-    if (!isLiveKitConfigured() || !liveKitConnected || agentReady) {
+    if (!isLiveKitConfigured() || agentReady) {
+      waitingForAgentSinceMsRef.current = null;
       setAllowStartWithoutAgent(false);
+      return;
+    }
+    if (!liveKitConnected) {
+      return;
+    }
+    if (waitingForAgentSinceMsRef.current === null) {
+      waitingForAgentSinceMsRef.current = Date.now();
+    }
+    const elapsed = Date.now() - waitingForAgentSinceMsRef.current;
+    const remaining = Math.max(0, 25000 - elapsed);
+    if (remaining === 0) {
+      setAllowStartWithoutAgent(true);
       return;
     }
     const id = window.setTimeout(() => {
       console.warn('[LiveKit] Agent not ready after 25s; allowing recording without agent.');
       setAllowStartWithoutAgent(true);
-    }, 25000);
+    }, remaining);
     return () => clearTimeout(id);
   }, [liveKitConnected, agentReady]);
 
@@ -788,6 +1058,12 @@ export default function RecordPage() {
 
     localSttIntervalRef.current = setInterval(async () => {
       const text = localSttBufferRef.current.trim();
+      // #region agent log H2
+      debugLog('H2', 'record/page.tsx:localSTT:tick', 'local STT interval tick', {
+        bufferedChars: text.length,
+        willSend: text.length >= 50,
+      });
+      // #endregion
       if (text.length < 50) return;
       try {
         const response = await authFetch('/api/process-transcript', {
@@ -797,6 +1073,12 @@ export default function RecordPage() {
         });
         if (response.ok) {
           const data = (await response.json()) as { concepts?: ConceptData[] };
+          // #region agent log H2
+          debugLog('H2', 'record/page.tsx:localSTT:response', 'process-transcript response received', {
+            ok: response.ok,
+            conceptsCount: Array.isArray(data.concepts) ? data.concepts.length : 0,
+          });
+          // #endregion
           if (Array.isArray(data.concepts) && data.concepts.length > 0) {
             addConceptsToMap(data.concepts);
           }
@@ -820,6 +1102,67 @@ export default function RecordPage() {
       speechRecognitionRef.current = null;
     };
   }, [isRecording, isPaused, stream, allowStartWithoutAgent, addConceptsToMap]);
+
+  useEffect(() => {
+    // #region agent log H4
+    debugLog('H4', 'record/page.tsx:useEffect:renderState', 'render state update', {
+      nodeCount: nodes.length,
+      edgeCount: edges.length,
+      isRecording,
+      liveKitConnected,
+      agentReady,
+      allowStartWithoutAgent,
+    });
+    // #endregion
+  }, [nodes.length, edges.length, isRecording, liveKitConnected, agentReady, allowStartWithoutAgent]);
+
+  useEffect(() => {
+    const w = window as Window & {
+      __smartsketchDebugInjectTranscript?: (text: string) => Promise<void>;
+      __smartsketchDebugInjectDemoTranscript?: () => Promise<void>;
+      __smartsketchDebugDemoTranscript?: string;
+    };
+
+    w.__smartsketchDebugInjectTranscript = async (text: string) => {
+      const transcript = (text || '').trim();
+      // #region agent log H5
+      debugLog('H5', 'record/page.tsx:debugInject:start', 'debug transcript injection started', {
+        transcriptChars: transcript.length,
+      });
+      // #endregion
+      if (!transcript) return;
+
+      const response = await authFetch('/api/process-transcript', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript }),
+      });
+      const data = (await response.json().catch(() => ({}))) as { concepts?: ConceptData[]; error?: string };
+
+      // #region agent log H5
+      debugLog('H5', 'record/page.tsx:debugInject:response', 'debug transcript injection response', {
+        ok: response.ok,
+        conceptsCount: Array.isArray(data.concepts) ? data.concepts.length : 0,
+        error: typeof data.error === 'string' ? data.error : null,
+      });
+      // #endregion
+
+      if (response.ok && Array.isArray(data.concepts) && data.concepts.length > 0) {
+        addConceptsToMap(data.concepts);
+      }
+      setTranscripts((prev) => [...prev, transcript]);
+    };
+    w.__smartsketchDebugDemoTranscript = DEBUG_DEMO_TRANSCRIPT;
+    w.__smartsketchDebugInjectDemoTranscript = async () => {
+      await w.__smartsketchDebugInjectTranscript?.(DEBUG_DEMO_TRANSCRIPT);
+    };
+
+    return () => {
+      delete w.__smartsketchDebugInjectTranscript;
+      delete w.__smartsketchDebugInjectDemoTranscript;
+      delete w.__smartsketchDebugDemoTranscript;
+    };
+  }, [addConceptsToMap]);
 
   const handleChatSubmit = useCallback(
     async (e: FormEvent) => {
@@ -880,6 +1223,15 @@ export default function RecordPage() {
       return;
     }
     if (stream) {
+      // #region agent log H8
+      debugLog('H8', 'record/page.tsx:handleStartRecording', 'handleStartRecording entered', {
+        liveKitConnected,
+        agentReady,
+        allowStartWithoutAgent,
+        hasRoom: !!roomRef.current,
+        roomState: roomRef.current?.state ?? null,
+      });
+      // #endregion
       console.log('[Start Recording] Stream available, beginning recording...');
       console.log('[Start Recording] Video tracks:', stream.getVideoTracks().length);
       console.log('[Start Recording] Audio tracks:', stream.getAudioTracks().length);
@@ -914,28 +1266,10 @@ export default function RecordPage() {
       }
 
       // Reset mind map
-      setNodes([{
-        id: 'center',
-        data: { label: 'Lecture', plainLabel: 'Lecture' },
-        position: { x: 250, y: 200 },
-        style: {
-          background: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
-          color: '#0c0f14',
-          border: 'none',
-          borderRadius: '50%',
-          width: 100,
-          height: 100,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: '14px',
-          fontWeight: 'bold',
-          boxShadow: '0 0 30px rgba(20, 184, 166, 0.4)',
-        },
-      }]);
+      setNodes([createRecordCenterFlowNode()]);
       setEdges([]);
       nodeCounterRef.current = 0;
-      nodePositionsRef.current = new Map([['center', { x: 250, y: 200, childCount: 0 }]]);
+      accumulatedConceptsRef.current = [];
       setTranscripts([]);
       localSttBufferRef.current = '';
 
@@ -1030,6 +1364,13 @@ export default function RecordPage() {
   };
 
   const confirmStopRecording = async () => {
+    // #region agent log H7
+    debugLog('H7', 'record/page.tsx:confirmStopRecording:start', 'confirmStopRecording invoked', {
+      hasRoom: !!roomRef.current,
+      roomState: roomRef.current?.state ?? null,
+      liveKitConnected,
+    });
+    // #endregion
     // Stop audio recording if still recording (might be paused)
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
@@ -1131,28 +1472,10 @@ export default function RecordPage() {
                       setChatMessages([]);
                       setTranscripts([]);
                       setTranscriptModal(null);
-                      setNodes([{
-                        id: 'center',
-                        data: { label: 'Lecture', plainLabel: 'Lecture' },
-                        position: { x: 250, y: 200 },
-                        style: {
-                          background: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
-                          color: '#0c0f14',
-                          border: 'none',
-                          borderRadius: '50%',
-                          width: 100,
-                          height: 100,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontSize: '14px',
-                          fontWeight: 'bold',
-                          boxShadow: '0 0 30px rgba(20, 184, 166, 0.4)',
-                        },
-                      }]);
+                      setNodes([createRecordCenterFlowNode()]);
                       setEdges([]);
                       nodeCounterRef.current = 0;
-                      nodePositionsRef.current = new Map([['center', { x: 250, y: 200, childCount: 0 }]]);
+                      accumulatedConceptsRef.current = [];
                       audioChunksRef.current = [];
                       isTracksPausedRef.current = false;
 

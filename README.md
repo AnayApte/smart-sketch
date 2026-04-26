@@ -127,10 +127,33 @@ smart-sketch/
 ### Available Scripts
 
 - `npm run dev` - Start development server
+- `npm run dev:full` - Start Next.js and Python LiveKit agent together (recommended for local development)
 - `npm run build` - Build for production
 - `npm start` - Start production server
 - `npm run lint` - Run ESLint
 - `npm run type-check` - Run TypeScript type checking
+
+### Troubleshooting: "Waiting for the Python agent..."
+
+If `/record` gets stuck on:
+
+`LiveKit connected. Waiting for the Python agent...`
+
+the most common root cause is that the Python LiveKit agent is not running, even though the Next.js app is running.
+
+Symptoms:
+- `/api/livekit/token` returns `200`
+- LiveKit room connects in the browser
+- Agent never appears in the room, so the UI keeps waiting
+
+Fix:
+1. Start both services together:
+   ```bash
+   npm run dev:full
+   ```
+2. If needed, start manually in separate terminals:
+   - `npm run dev`
+   - `python agent/main.py dev`
 
 ## 🎨 Customization
 
