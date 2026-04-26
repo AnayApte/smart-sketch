@@ -11,6 +11,7 @@ import { ProtectedRoute } from '@/components/ProtectedRoute';
 import NeuralNetworkBackground from '@/components/NeuralNetworkBackground';
 import { getSession, SavedSession } from '@/lib/sessions-service';
 import { authFetch } from '@/lib/auth-fetch';
+import { hydrateMindMapNodesForSessionView } from '@/lib/mind-map-layout';
 
 export default function SessionPage() {
   const router = useRouter();
@@ -44,7 +45,7 @@ export default function SessionPage() {
         
         // Set nodes and edges from saved data
         if (Array.isArray(data.mind_map_nodes)) {
-          setNodes(data.mind_map_nodes);
+          setNodes(hydrateMindMapNodesForSessionView(data.mind_map_nodes));
         }
         if (Array.isArray(data.mind_map_edges)) {
           setEdges(data.mind_map_edges);

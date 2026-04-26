@@ -360,6 +360,7 @@ function pushMindMapConceptNode(
     draggable: true,
     data: {
       plainLabel: cleanedText.title,
+      plainDescription: cleanedText.description?.trim() ?? '',
       label: labelEl as ReactNode,
     },
     style: {
@@ -721,4 +722,46 @@ export function buildMindMapLayout(
   resolveMindMapCollisions(newNodes, concepts, edgeVariant, childrenByParent);
 
   return { nodes: newNodes, edges: newEdges };
+}
+
+type SessionNodeData = {
+  plainLabel?: string;
+  plainDescription?: string;
+  label?: unknown;
+  [key: string]: unknown;
+};
+
+/** Rebuild JSX labels for saved sessions (`plainLabel` + optional `plainDescription` from DB). */
+export function hydrateMindMapNodesForSessionView(nodes: Node[]): Node[] {
+  return nodes.map((n) => {
+    const d = (n.data || {}) as SessionNodeData;
+    const title = typeof d.plainLabel === 'string' && d.plainLabel.trim() ? d.plainLabel.trim() : 'Node';
+    const desc = typeof d.plainDescription === 'string' ? d.plainDescription.trim() : '';
+    if (!desc) {
+      return {
+        ...n,
+        data: {
+          ...d,
+          plainLabel: title,
+          plainDescription: '',
+          label: title,
+        },
+      };
+    }
+    const labelEl = (
+      <div className="text-center">
+        <div className="font-semibold">{title}</div>
+        <div className="text-xs mt-1 opacity-75 line-clamp-2">{desc}</div>
+      </div>
+    ) as ReactNode;
+    return {
+      ...n,
+      data: {
+        ...d,
+        plainLabel: title,
+        plainDescription: desc,
+        label: labelEl,
+      },
+    };
+  });
 }

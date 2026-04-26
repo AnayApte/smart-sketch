@@ -46,16 +46,47 @@ function plainTextFromNodeData(data: Record<string, unknown> | undefined): strin
   return 'Node';
 }
 
+/** Second child of mind-map label JSX is the description line (serialized DB shape). */
+function extractDescriptionFromSerializedLabel(label: unknown): string {
+  if (!isSerializedReactElementLike(label)) return '';
+  const kids = (label as { props?: { children?: unknown } }).props?.children;
+  if (!Array.isArray(kids) || kids.length < 2) return '';
+  const second = kids[1] as { props?: { children?: unknown } } | undefined;
+  if (!second || typeof second !== 'object' || !('props' in second)) return '';
+  const inner = second.props?.children;
+  return typeof inner === 'string' ? inner.trim() : '';
+}
+
+function extractDescriptionFromLiveReactLabel(label: unknown): string {
+  if (!isRenderableReactNode(label)) return '';
+  const props = (label as { props?: { children?: unknown } }).props;
+  const ch = props?.children;
+  if (!Array.isArray(ch) || ch.length < 2) return '';
+  const second = ch[1] as { props?: { children?: unknown } } | undefined;
+  if (!second || typeof second !== 'object' || !('props' in second)) return '';
+  const inner = second.props?.children;
+  return typeof inner === 'string' ? inner.trim() : '';
+}
+
+function resolvePlainDescription(data: Record<string, unknown>, label: unknown): string {
+  const pd = data.plainDescription;
+  if (typeof pd === 'string' && pd.trim()) return pd.trim();
+  return extractDescriptionFromSerializedLabel(label) || extractDescriptionFromLiveReactLabel(label);
+}
+
 /** Strip JSX from `data.label` so JSON/Supabase round-trips safely; React Flow accepts string labels. */
 export function sanitizeMindMapNodesForStorage(nodes: Node[]): Node[] {
   return nodes.map((node) => {
     const data = (node.data || {}) as Record<string, unknown>;
     const plain = plainTextFromNodeData(data);
+    const label = data.label;
+    const plainDesc = resolvePlainDescription(data, label);
     return {
       ...node,
       data: {
         ...data,
         plainLabel: plain,
+        plainDescription: plainDesc,
         label: plain,
       },
     };
@@ -70,6 +101,7 @@ export function normalizeMindMapNodesFromDb(nodes: unknown): Node[] {
     const data = (node.data || {}) as Record<string, unknown>;
     const plain = plainTextFromNodeData(data);
     const label = data.label;
+    const plainDesc = resolvePlainDescription(data, label);
     if (typeof label === 'string' && !isSerializedReactElementLike(label) && !isRenderableReactNode(label)) {
       return {
         ...node,
@@ -77,6 +109,8 @@ export function normalizeMindMapNodesFromDb(nodes: unknown): Node[] {
           ...data,
           plainLabel:
             typeof data.plainLabel === 'string' && data.plainLabel.trim() ? data.plainLabel : label.trim(),
+          plainDescription: plainDesc,
+          label: plain,
         },
       };
     }
@@ -86,6 +120,7 @@ export function normalizeMindMapNodesFromDb(nodes: unknown): Node[] {
         data: {
           ...data,
           plainLabel: plain,
+          plainDescription: plainDesc,
           label: plain,
         },
       };
@@ -95,6 +130,7 @@ export function normalizeMindMapNodesFromDb(nodes: unknown): Node[] {
       data: {
         ...data,
         plainLabel: plain,
+        plainDescription: plainDesc,
         label: plain,
       },
     };
